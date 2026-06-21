@@ -16,7 +16,11 @@ class CriticalPathResult(BaseModel):
     
     # Critical path details
     critical_path: List[str]  # Sequence of item IDs on critical path
+    critical_path_items: List[str]  # Items on critical path, preserved for backward compatibility
     critical_path_duration_hours: float  # Full duration using current_estimate_hrs
+    critical_path_duration_hours_original: float  # Full original duration using estimated_effort_hrs
+    critical_path_growth_hours: float  # Current minus original estimates for critical path items
+    critical_path_growth_percent: float  # Growth percent relative to original critical path duration
     critical_path_duration_days: float
     critical_path_remaining_hours: float  # Remaining effort on critical path (using remaining_effort_hrs)
     
@@ -67,6 +71,7 @@ class CriticalPathEngine:
         
         # Compute critical path duration using current estimates (post-scope-change)
         cp_duration_hours = 0.0
+        cp_duration_hours_original = 0.0
         cp_remaining_hours = 0.0
         for item_id in critical_path:
             work_item = self.work_items.get(item_id)
@@ -78,17 +83,27 @@ class CriticalPathEngine:
                     f"This indicates referential integrity violation."
                 )
             cp_duration_hours += work_item.current_estimate_hrs
+            cp_duration_hours_original += work_item.estimated_effort_hrs
             cp_remaining_hours += max(0.0, work_item.remaining_effort_hrs)
         
         # Estimate working days (using avg 8 hours/day)
         cp_duration_days = cp_duration_hours / 8.0
+        cp_growth_hours = cp_duration_hours - cp_duration_hours_original
+        cp_growth_percent = (
+            (cp_growth_hours / cp_duration_hours_original) * 100.0
+            if cp_duration_hours_original else 0.0
+        )
         
         # Count parallel critical paths (approximation)
         num_cp = self._count_critical_paths(slack_map)
         
         return CriticalPathResult(
             critical_path=critical_path,
+            critical_path_items=critical_path,
             critical_path_duration_hours=cp_duration_hours,
+            critical_path_duration_hours_original=cp_duration_hours_original,
+            critical_path_growth_hours=cp_growth_hours,
+            critical_path_growth_percent=cp_growth_percent,
             critical_path_duration_days=cp_duration_days,
             critical_path_remaining_hours=cp_remaining_hours,
             item_slack_map=slack_map,

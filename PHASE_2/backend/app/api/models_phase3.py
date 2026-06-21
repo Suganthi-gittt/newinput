@@ -29,10 +29,10 @@ class ForecastDelayBreakdown(BaseModel):
     )
     # Additive breakdown of remaining_days_total
     remaining_days_base_work: float = Field(
-        ..., description="Portion of remaining_days driven by raw remaining effort at projected velocity"
+        ..., description="Portion of delay driven by raw remaining effort at base velocity"
     )
     remaining_days_spillover: float = Field(
-        ..., description="Portion of remaining_days driven by spillover penalty hours at projected velocity"
+        ..., description="Portion of delay driven by spillover schedule impact at projected velocity"
     )
     remaining_days_blocker_loss: float = Field(
         ...,
@@ -67,6 +67,14 @@ class ForecastScheduleDiagnostics(BaseModel):
     blocker_days: float = Field(..., description="Extra days from blocker velocity loss (projected vs base)")
     critical_path_days: float = Field(..., description="Extra days from critical path serialisation beyond remaining effort")
     diagnostic_total_days: float = Field(..., description="Sum of above components (does not equal expected_delay_days)")
+    velocity_floor_saturated_by_blockers: Optional[bool] = Field(
+        False,
+        description="True when blockers reduce velocity to the floor value used by the forecast",
+    )
+    spillover_message: Optional[str] = Field(
+        "",
+        description="Narrative explanation of spillover impact on the forecast",
+    )
 
 
 class ForecastEffortBreakdown(BaseModel):
@@ -74,9 +82,9 @@ class ForecastEffortBreakdown(BaseModel):
 
     raw_remaining_effort_hours: float = Field(..., description="Remaining effort without spillover or critical path uplift")
     critical_path_remaining_hours: float = Field(..., description="Remaining critical path effort used by the forecast")
-    spillover_penalty_hours: float = Field(..., description="Additional effort from predicted spillover items")
+    spillover_penalty_hours: float = Field(..., description="Equivalent penalty hours from predicted spillover items used for schedule delay calculation")
     blocker_penalty_hours: float = Field(..., description="Effective velocity penalty converted to equivalent effort hours")
-    forecast_adjusted_effort_hours: float = Field(..., description="Total adjusted effort used by the forecast")
+    forecast_adjusted_effort_hours: float = Field(..., description="Adjusted effort used by the forecast calculation (critical path uplift only)")
 
 
 class ForecastResult(BaseModel):
@@ -91,9 +99,15 @@ class ForecastResult(BaseModel):
     on_track: bool = Field(..., description="True if expected_finish_date <= target_end_date, false otherwise")
     raw_remaining_effort_hours: float = Field(..., description="Remaining effort before forecast adjustments")
     critical_path_remaining_hours: float = Field(..., description="Remaining critical-path effort used by the forecast")
-    spillover_penalty_hours: float = Field(..., description="Additional hours added by predicted spillover")
+    predicted_spillover_items: float = Field(..., description="Expected number of spillover items predicted across remaining sprints")
+    spillover_delay_days: float = Field(..., description="Schedule impact of predicted spillover items in days")
+    spillover_penalty_hours: float = Field(..., description="Equivalent hours from predicted spillover items used for schedule delay calculation")
     blocker_penalty_hours: float = Field(..., description="Velocity penalty hours due to blockers")
     forecast_adjusted_effort_hours: float = Field(..., description="Adjusted effort used for the forecast calculation")
+    scope_growth_hours: float = Field(..., description="Total additional effort hours added since baseline scope")
+    scope_growth_percent: float = Field(..., description="Scope growth as a percentage of original project estimate hours")
+    scope_impact_days: float = Field(..., description="Estimated days added by scope growth using projected velocity per day")
+    scope_growth_message: str = Field(..., description="Narrative explaining the scope growth impact on the forecast")
     delay_breakdown: ForecastDelayBreakdown = Field(
         ...,
         description=(
@@ -170,8 +184,8 @@ class MonteCarloResult(BaseModel):
     most_likely_finish_date: datetime = Field(..., description="Median finish date (most likely outcome)")
     best_case_finish_date: datetime = Field(..., description="10th percentile (best case)")
     p80_finish_date: datetime = Field(..., description="80th percentile (80% of outcomes complete by this date)")
+    p90_finish_date: datetime = Field(..., description="90th percentile (90% of outcomes complete by this date)")
     p95_finish_date: datetime = Field(..., description="95th percentile (95% of outcomes complete by this date)")
-    worst_case_finish_date: datetime = Field(..., description="90th percentile (worst case)")
 
 
 class MonteCarloResponse(BaseModel):
@@ -343,6 +357,13 @@ class RecommendationSummary(BaseModel):
     baseline_risk_score: float = Field(..., description="Baseline overall risk score")
     after_risk_score: float = Field(..., description="Overall risk score after recommendation")
     expected_risk_reduction: float = Field(..., description="Risk score reduction")
+    impact_level: str = Field(..., description="High/Medium/Low impact level for the recommendation")
+    impact_confidence: str = Field(..., description="High/Medium/Low impact confidence relative to Monte Carlo noise")
+    impact_classification: str = Field(..., description="Impact classification such as Positive Impact, Negative Impact, or Negligible Impact")
+    business_impact: str = Field(..., description="Business impact summary for the recommendation")
+    impact_summary: str = Field(..., description="Summary of the recommendation's expected impact")
+    category: Optional[str] = Field(None, description="Category of the blocker if applicable")
+    recommended_actions: List[str] = Field(default_factory=list, description="Category-aware recommended actions")
 
 
 class RecommendationResult(BaseModel):

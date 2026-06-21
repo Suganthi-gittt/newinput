@@ -121,6 +121,10 @@ def test_forecast_basic():
     assert result.projected_velocity > 0
     assert isinstance(result.expected_finish_date, datetime)
     assert 0.0 <= result.completion_percentage <= 1.0
+    assert isinstance(result.scope_growth_hours, float)
+    assert isinstance(result.scope_growth_percent, float)
+    assert isinstance(result.scope_impact_days, float)
+    assert isinstance(result.scope_growth_message, str)
     
     # R5: Target date comparison
     assert isinstance(result.target_end_date, datetime)
@@ -543,14 +547,14 @@ def test_monte_carlo_best_most_likely_worst_case():
     )
     result = engine.calculate()
     
-    # best_case <= most_likely <= worst_case
+# best_case <= most_likely <= p90
     assert result.best_case_finish_date <= result.most_likely_finish_date
-    assert result.most_likely_finish_date <= result.worst_case_finish_date
-    
+    assert result.most_likely_finish_date <= result.p90_finish_date
+
     # These should match the percentiles
     assert result.best_case_finish_date == result.statistics.percentile_10
     assert result.most_likely_finish_date == result.statistics.percentile_50
-    assert result.worst_case_finish_date == result.statistics.percentile_90
+    assert result.p90_finish_date == result.statistics.percentile_90
 
 
 def test_monte_carlo_p80_p95_percentiles():
@@ -591,9 +595,8 @@ def test_monte_carlo_p80_p95_percentiles():
     assert result.p80_finish_date == result.statistics.percentile_80
     assert result.p95_finish_date == result.statistics.percentile_95
     
-    # Verify proper ordering: best < most_likely < worst < p80 doesn't make sense
-    # Correct order: p10 < p25 < p50 < p75 < p80 < p90 < p95
-    # So: best_case (p10) < most_likely (p50) < p80 < worst_case (p90) < p95
+    # Verify proper ordering: p10 < p25 < p50 < p75 < p80 < p90 < p95
+    # So: best_case (p10) < most_likely (p50) < p80 < p90 < p95
     assert result.best_case_finish_date <= result.p80_finish_date
-    assert result.p80_finish_date <= result.worst_case_finish_date
-    assert result.worst_case_finish_date <= result.p95_finish_date
+    assert result.p80_finish_date <= result.p90_finish_date
+    assert result.p90_finish_date <= result.p95_finish_date

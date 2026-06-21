@@ -284,7 +284,11 @@ class WorkbookParser:
                 estimated_effort_hrs=self._get_float_safe(row, "Orig Est (h)"),
                 current_estimate_hrs=self._get_float_safe(row, "Curr Est (h)"),
                 actual_effort_hrs=self._get_float_safe(row, "Actual Hrs"),
-                remaining_effort_hrs=self._get_float_safe(row, "Remaining Hrs"),
+                remaining_effort_hrs=self._resolve_remaining_effort(
+                    row.get("Remaining Hrs"),
+                    self._get_float_safe(row, "Curr Est (h)"),
+                    self._parse_work_item_status(row),
+                ),
                 progress_pct=self._get_float_safe(row, "Progress %"),
                 status=self._parse_work_item_status(row),
                 is_scope_changed=self._parse_yes_no(self._get_optional_str(row, "Scope Change")),
@@ -293,6 +297,30 @@ class WorkbookParser:
         
         return work_items
     
+    def _resolve_remaining_effort(
+        self,
+        remaining_value: Any,
+        current_estimate: float,
+        status: WorkItemStatus,
+    ) -> float:
+        """Resolve remaining effort based on status and workbook value."""
+        if remaining_value is not None:
+            if isinstance(remaining_value, str) and remaining_value.strip() == "":
+                remaining_value = None
+            else:
+                try:
+                    return float(remaining_value)
+                except (ValueError, TypeError):
+                    return 0.0
+
+        if status in {WorkItemStatus.DONE, WorkItemStatus.COMPLETED}:
+            return 0.0
+
+        if status == WorkItemStatus.NOT_STARTED:
+            return current_estimate
+
+        return 0.0
+
     def _parse_dependencies(self) -> List[Dependency]:
         """Parse Dependencies sheet (multiple rows)."""
         data_rows = self._get_sheet_data("Dependencies")

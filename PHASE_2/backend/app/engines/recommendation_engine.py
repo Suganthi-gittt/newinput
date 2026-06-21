@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -53,6 +54,44 @@ BLOCKER_CATEGORY_HINTS = {
         "Assign a single owner with clear deadline."
     ),
 }
+
+BLOCKER_CATEGORY_ACTIONS = {
+    "External Team Dependency": [
+        "Escalate dependency owner",
+        "Request interim specification",
+        "Identify parallel work streams",
+    ],
+    "Hardware / Procurement": [
+        "Expedite procurement",
+        "Engage alternate supplier",
+        "Use simulation hardware",
+        "Advance software-only tasks",
+    ],
+    "Specification": [
+        "Request provisional specification",
+        "Escalate through program management",
+        "Freeze dependent requirements",
+        "Implement assumptions-based branch",
+    ],
+    "Vendor": [
+        "Request provisional supplier commitment",
+        "Escalate through program management",
+        "Freeze dependent requirements",
+        "Implement assumptions-based branch",
+    ],
+    "Resource": [
+        "Assign senior engineer",
+        "Pair-program resolution",
+        "Time-box investigation",
+        "Escalate after defined duration",
+    ],
+    "Other": [
+        "Review the blocker with the team",
+        "Assign a clear owner and deadline",
+        "Identify escalation path",
+        "Track progress daily",
+    ],
+}
 from app.engines.dependency_engine import DependencyGraphEngine, DependencyDAG
 from app.engines.critical_path_engine import CriticalPathEngine, CriticalPathResult
 from app.engines.spillover_engine import SpilloverAnalysisEngine, SpilloverAnalysis
@@ -60,6 +99,7 @@ from app.engines.forecast_engine import ForecastEngine, ForecastResult
 from app.engines.monte_carlo_engine import MonteCarloEngine, MonteCarloResult
 from app.engines.impact_scoring_engine import ImpactScoringEngine, RiskScores
 from app.engines.risk_engine import RiskEngine, RiskResult
+from app.engines.simulation_engine import SimulationAction, SimulationEngine
 from app.api.models_phase3 import (
     RecommendationType,
 )
@@ -89,6 +129,15 @@ class RecommendationCandidate:
     expected_probability_gain: float = 0.0
     expected_delay_gain_days: float = 0.0
     expected_risk_reduction: float = 0.0
+    raw_expected_probability_gain: float = 0.0
+    raw_expected_risk_reduction: float = 0.0
+    impact_confidence: str = "Medium"
+    impact_classification: str = "Positive Impact"
+    impact_level: str = "Medium"
+    business_impact: str = ""
+    impact_summary: str = ""
+    category: Optional[str] = None
+    recommended_actions: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -107,13 +156,26 @@ class RecommendationCandidate:
             "after_probability": round(self.after_probability, 4),
             "after_delay_days": round(self.after_delay_days, 2),
             "after_risk_score": round(self.after_risk_score, 2),
-            "expected_probability_gain": round(self.expected_probability_gain, 4),
+            "expected_probability_gain": round(self._display_probability_gain(), 4),
             "expected_delay_gain_days": round(self.expected_delay_gain_days, 2),
-            "expected_risk_reduction": round(self.expected_risk_reduction, 2),
+            "expected_risk_reduction": round(self._display_risk_reduction(), 2),
+            "impact_level": self.impact_level,
+            "impact_confidence": self.impact_confidence,
+            "impact_classification": self.impact_classification,
+            "business_impact": self.business_impact,
+            "impact_summary": self.impact_summary,
+            "category": self.category,
+            "recommended_actions": self.recommended_actions,
         }
 
 
 class RecommendationEngine:
+    # Noise thresholds set from repeated baseline Monte Carlo runs:
+    # - probability noise span ~0.004
+    # - risk noise span ~0.16
+    PROBABILITY_NOISE_THRESHOLD = 0.005
+    RISK_NOISE_THRESHOLD = 0.2
+
     def __init__(
         self,
         project_state: ProjectState,
@@ -180,21 +242,37 @@ class RecommendationEngine:
 
     def simulate_scenario(self, recommendation_ids: List[str]) -> Dict[str, Any]:
         baseline = self._baseline_summary()
-        clone = self.project_state.model_copy(deep=True)
+        actions = []
         for rec_id in recommendation_ids:
             candidate = self._find_candidate_by_id(rec_id)
             if not candidate:
                 raise RecommendationError(f"Recommendation {rec_id} not found")
-            self._apply_candidate(clone, candidate)
+            actions.append(self._candidate_to_simulation_action(candidate))
 
-        summary = self._recalculate_summary(clone)
+        simulation_engine = SimulationEngine(
+            project_state=self.project_state,
+            metrics=self.metrics,
+            dag=self.dag,
+            cp_result=self.cp_result,
+            spillover=self.spillover,
+            forecast=self.forecast,
+            monte_carlo=self.monte_carlo,
+            risk_result=self.risk_result,
+            simulation_count=self.simulation_count,
+        )
+        result = simulation_engine.simulate_recommendation_actions(actions)
         return {
             "baseline": baseline,
-            "scenario": summary,
+            "scenario": {
+                "probability": result.simulated_probability,
+                "delay_days": result.simulated_delay_days,
+                "risk_score": result.simulated_risk_score,
+            },
             "recommendation_ids": recommendation_ids,
-            "probability_gain": round(summary["probability"] - baseline["probability"], 4),
-            "delay_reduction": round(baseline["delay_days"] - summary["delay_days"], 2),
-            "risk_reduction": round(baseline["risk_score"] - summary["risk_score"], 2),
+            "probability_gain": round(result.simulated_probability - baseline["probability"], 4),
+            "delay_reduction": round(baseline["delay_days"] - result.simulated_delay_days, 2),
+            "risk_reduction": round(baseline["risk_score"] - result.simulated_risk_score, 2),
+            "action_reasons": result.action_reasons,
         }
 
     # ------------------------------------------------------------------
@@ -212,7 +290,10 @@ class RecommendationEngine:
         )[:2]:
             target_ids = [blocker.blocker_id]
             reason = self._blocker_reason(blocker)
-            action = f"Resolve blocker {blocker.blocker_id} first"
+            category_value = getattr(blocker, "category", BlockerCategory.OTHER).value
+            action = (
+                f"Resolve blocker {blocker.blocker_id} using category-specific actions for {category_value}"
+            )
             candidates.append(
                 RecommendationCandidate(
                     recommendation_id=self._next_id(),
@@ -231,6 +312,8 @@ class RecommendationEngine:
                         "cp_items_affected": self._count_critical_path_involvement(blocker),
                         "downstream_count": self._count_downstream(blocker),
                     },
+                    category=getattr(blocker, "category", BlockerCategory.OTHER).value,
+                    recommended_actions=self._blocker_recommendation_actions(blocker),
                     reason=reason,
                     implementation_effort="Low",
                     confidence="High",
@@ -561,20 +644,43 @@ class RecommendationEngine:
     # Simulation helpers
     # ------------------------------------------------------------------
     def _simulate_candidate(self, candidate: RecommendationCandidate) -> None:
-        clone = self.project_state.model_copy(deep=True)
-        self._apply_candidate(clone, candidate)
-        result = self._recalculate_summary(clone)
-        candidate.after_probability = result["probability"]
-        candidate.after_delay_days = result["delay_days"]
-        candidate.after_risk_score = result["risk_score"]
-        candidate.expected_probability_gain = round(
+        action = self._candidate_to_simulation_action(candidate)
+        simulation_engine = SimulationEngine(
+            project_state=self.project_state,
+            metrics=self.metrics,
+            dag=self.dag,
+            cp_result=self.cp_result,
+            spillover=self.spillover,
+            forecast=self.forecast,
+            monte_carlo=self.monte_carlo,
+            risk_result=self.risk_result,
+            simulation_count=self.simulation_count,
+        )
+        result = simulation_engine.simulate_recommendation_actions([action])
+        candidate.after_probability = result.simulated_probability
+        candidate.after_delay_days = result.simulated_delay_days
+        candidate.after_risk_score = result.simulated_risk_score
+        candidate.raw_expected_probability_gain = round(
             candidate.after_probability - candidate.baseline_probability, 4
         )
+        candidate.expected_probability_gain = candidate.raw_expected_probability_gain
         candidate.expected_delay_gain_days = round(
             candidate.baseline_delay_days - candidate.after_delay_days, 2
         )
-        candidate.expected_risk_reduction = round(
+        candidate.raw_expected_risk_reduction = round(
             candidate.baseline_risk_score - candidate.after_risk_score, 2
+        )
+        candidate.expected_risk_reduction = candidate.raw_expected_risk_reduction
+        self._apply_noise_thresholds(candidate)
+        self._populate_impact_metadata(candidate)
+
+    def _candidate_to_simulation_action(self, candidate: RecommendationCandidate):
+        return SimulationAction(
+            action_id=candidate.recommendation_id,
+            action_type=candidate.type.value,
+            target_ids=candidate.target_ids,
+            details=candidate.details,
+            impact_reason=candidate.reason or candidate.impact_summary,
         )
 
     def _apply_candidate(self, clone: ProjectState, candidate: RecommendationCandidate) -> None:
@@ -771,6 +877,93 @@ class RecommendationEngine:
 
         candidate.priority_score = max(0.0, min(100.0, priority * 100.0))
 
+    def _populate_impact_metadata(self, candidate: RecommendationCandidate) -> None:
+        candidate.impact_level = self._determine_impact_level(candidate)
+        candidate.impact_confidence = self._determine_impact_confidence(candidate)
+        candidate.impact_classification = self._determine_impact_classification(candidate)
+        candidate.business_impact = self._describe_business_impact(candidate)
+        candidate.impact_summary = self._build_impact_summary(candidate)
+
+    def _apply_noise_thresholds(self, candidate: RecommendationCandidate) -> None:
+        probability_gain = candidate.raw_expected_probability_gain
+        risk_reduction = candidate.raw_expected_risk_reduction
+
+        if abs(probability_gain) <= self.PROBABILITY_NOISE_THRESHOLD:
+            candidate.expected_probability_gain = 0.0
+        if abs(risk_reduction) <= self.RISK_NOISE_THRESHOLD:
+            candidate.expected_risk_reduction = 0.0
+
+    def _determine_impact_confidence(self, candidate: RecommendationCandidate) -> str:
+        if (
+            abs(candidate.raw_expected_probability_gain) <= self.PROBABILITY_NOISE_THRESHOLD
+            and abs(candidate.raw_expected_risk_reduction) <= self.RISK_NOISE_THRESHOLD
+        ):
+            return "Low"
+        if (
+            abs(candidate.raw_expected_probability_gain) <= self.PROBABILITY_NOISE_THRESHOLD * 2
+            or abs(candidate.raw_expected_risk_reduction) <= self.RISK_NOISE_THRESHOLD * 2
+        ):
+            return "Medium"
+        return "High"
+
+    def _determine_impact_classification(self, candidate: RecommendationCandidate) -> str:
+        if (
+            abs(candidate.raw_expected_probability_gain) <= self.PROBABILITY_NOISE_THRESHOLD
+            and abs(candidate.raw_expected_risk_reduction) <= self.RISK_NOISE_THRESHOLD
+        ):
+            return "Negligible Impact"
+        if candidate.expected_probability_gain < 0 or candidate.expected_risk_reduction < 0:
+            return "Negative Impact"
+        return "Positive Impact"
+
+    def _determine_impact_level(self, candidate: RecommendationCandidate) -> str:
+        if (
+            candidate.expected_probability_gain >= 0.10
+            or candidate.expected_delay_gain_days >= 5.0
+            or candidate.expected_risk_reduction >= 10.0
+        ):
+            return "High"
+        if (
+            candidate.expected_probability_gain >= 0.05
+            or candidate.expected_delay_gain_days >= 2.0
+            or candidate.expected_risk_reduction >= 5.0
+        ):
+            return "Medium"
+        return "Low"
+
+    def _describe_business_impact(self, candidate: RecommendationCandidate) -> str:
+        impact_text = {
+            RecommendationType.RESOLVE_BLOCKER: "Resolves a blocker affecting critical path work and reduces downstream schedule risk.",
+            RecommendationType.ADD_RESOURCE: "Adds capacity to relieve a skill bottleneck and improve on-time delivery.",
+            RecommendationType.REASSIGN_WORK: "Aligns the right skill to the right task to improve execution speed and schedule predictability.",
+            RecommendationType.REDUCE_ITEM_SCOPE: "Reduces scope risk on lower-priority work to protect the delivery date.",
+            RecommendationType.PARALLELIZE_TASKS: "Enables parallel execution of adjacent tasks to shorten the effective critical path.",
+            RecommendationType.MOVE_BLOCKER_ITEMS: "Keeps progress moving by advancing ready work around an existing blocker.",
+            RecommendationType.SPLIT_TASK: "Breaks up a large task to improve predictability and reduce execution variance.",
+            RecommendationType.CRITICAL_PATH_OPTIMIZATION: "Targets high-risk critical path items to reduce overall project delay.",
+        }
+        default_text = "Improves project delivery confidence and lowers schedule risk."
+        return impact_text.get(candidate.type, default_text)
+
+    def _build_impact_summary(self, candidate: RecommendationCandidate) -> str:
+        if candidate.impact_classification == "Negligible Impact":
+            return "Expected impact is within Monte Carlo noise and is therefore negligible."
+
+        probability_gain_pct = round(candidate.expected_probability_gain * 100.0, 1)
+        delay_gain_days = round(candidate.expected_delay_gain_days, 1)
+        if probability_gain_pct > 0 or delay_gain_days > 0:
+            return (
+                f"Expected to increase on-time delivery probability by {probability_gain_pct:.1f}% "
+                f"and reduce expected delay by {delay_gain_days:.1f} days."
+            )
+        return "Expected to provide modest schedule risk reduction."
+
+    def _display_probability_gain(self) -> float:
+        return self.expected_probability_gain
+
+    def _display_risk_reduction(self) -> float:
+        return self.expected_risk_reduction
+
     def _confidence_value(self, confidence: str) -> float:
         return {"High": 1.0, "Medium": 0.7, "Low": 0.4}.get(confidence, 0.5)
 
@@ -890,6 +1083,18 @@ class RecommendationEngine:
             f"{notes_context + ' ' if notes_context else ''}"
             f"Recommended action: {hint}"
         )
+
+    def _blocker_recommendation_actions(self, blocker: Blocker) -> List[str]:
+        category = getattr(blocker, "category", BlockerCategory.OTHER)
+        actions = BLOCKER_CATEGORY_ACTIONS.get(category.value)
+        if actions:
+            return actions
+
+        if category == BlockerCategory.HARDWARE:
+            return BLOCKER_CATEGORY_ACTIONS.get("Hardware / Procurement", [])
+        if category == BlockerCategory.VENDOR:
+            return BLOCKER_CATEGORY_ACTIONS.get("Vendor", [])
+        return BLOCKER_CATEGORY_ACTIONS.get("Other", [])
 
     def _count_downstream(self, blocker: Blocker) -> int:
         downstream = 0

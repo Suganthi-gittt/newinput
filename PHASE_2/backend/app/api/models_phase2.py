@@ -58,7 +58,11 @@ class DependenciesResponse(BaseModel):
     
     # Critical path
     critical_path: List[str]
+    critical_path_items: List[str]
     critical_path_duration_hours: float
+    critical_path_duration_hours_original: float
+    critical_path_growth_hours: float
+    critical_path_growth_percent: float
     critical_path_duration_days: float
     critical_path_item_count: int
     

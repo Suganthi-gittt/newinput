@@ -197,6 +197,35 @@ class TestWorkbookParser:
         assert len(project_state.work_items) > 0
         assert project_state.project_id  # Should have project ID
 
+    def test_resolve_remaining_effort_not_started_blank_defaults_to_current(self):
+        parser = WorkbookParser("/fake/path.xlsx")
+        status = WorkItemStatus.NOT_STARTED
+        current_estimate = 32.0
+
+        result = parser._resolve_remaining_effort(None, current_estimate, status)
+        assert result == 32.0
+
+        result_blank = parser._resolve_remaining_effort("", current_estimate, status)
+        assert result_blank == 32.0
+
+    def test_resolve_remaining_effort_done_or_completed_blank_defaults_to_zero(self):
+        parser = WorkbookParser("/fake/path.xlsx")
+
+        done_result = parser._resolve_remaining_effort(None, 32.0, WorkItemStatus.DONE)
+        assert done_result == 0.0
+
+        completed_result = parser._resolve_remaining_effort(None, 28.0, WorkItemStatus.COMPLETED)
+        assert completed_result == 0.0
+
+    def test_resolve_remaining_effort_uses_populated_workbook_value(self):
+        parser = WorkbookParser("/fake/path.xlsx")
+
+        explicit_value = parser._resolve_remaining_effort(12, 32.0, WorkItemStatus.NOT_STARTED)
+        assert explicit_value == 12.0
+
+        explicit_str = parser._resolve_remaining_effort("  8  ", 32.0, WorkItemStatus.DONE)
+        assert explicit_str == 8.0
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Validator Tests

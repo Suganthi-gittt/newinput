@@ -316,6 +316,125 @@ class TestCriticalPathEngine:
         assert result.critical_path_duration_hours > 0
         assert result.critical_path_duration_days > 0
 
+    def test_critical_path_growth_metrics(self):
+        """Test original and current critical path duration aggregation."""
+        start_date = datetime(2025, 1, 1)
+        project_info = ProjectInfo(
+            project_name="Growth Test",
+            sponsor="Test Sponsor",
+            business_unit="Engineering",
+            project_manager="Test PM",
+            customer="Test Customer",
+            status="Active",
+            start_date=start_date,
+            target_end_date=start_date + timedelta(days=30),
+            sprint_duration_days=14,
+            methodology="Agile Scrum",
+        )
+
+        team = [
+            Resource(
+                resource_id="R1",
+                name="Alice",
+                role="Engineer",
+                primary_skill="Python",
+                secondary_skill="None",
+                skill_level=SkillLevel.SENIOR,
+                allocation_pct=1.0,
+                availability_pct=1.0,
+            )
+        ]
+
+        sprints = [
+            Sprint(
+                sprint_id="S1",
+                sprint_name="Sprint 1",
+                sprint_number=1,
+                start_date=start_date,
+                end_date=start_date + timedelta(days=14),
+                working_days=10,
+                sprint_goal="Test sprint",
+                status=SprintStatus.NOT_STARTED,
+                planned_velocity_hrs=80.0,
+                carryover_count=0,
+            )
+        ]
+
+        work_items = [
+            WorkItem(
+                item_id="WI-001",
+                title="First task",
+                work_type=WorkItemType.TASK,
+                assigned_sprint="S1",
+                original_sprint="S1",
+                assigned_resource="R1",
+                required_skill=SkillLevel.SENIOR,
+                priority=Priority.HIGH,
+                estimated_effort_hrs=20.0,
+                current_estimate_hrs=30.0,
+                actual_effort_hrs=0.0,
+                remaining_effort_hrs=30.0,
+                progress_pct=0.0,
+                status=WorkItemStatus.NOT_STARTED,
+                is_scope_changed=False,
+                scope_change_reason=None,
+            ),
+            WorkItem(
+                item_id="WI-002",
+                title="Second task",
+                work_type=WorkItemType.TASK,
+                assigned_sprint="S1",
+                original_sprint="S1",
+                assigned_resource="R1",
+                required_skill=SkillLevel.SENIOR,
+                priority=Priority.HIGH,
+                estimated_effort_hrs=10.0,
+                current_estimate_hrs=20.0,
+                actual_effort_hrs=0.0,
+                remaining_effort_hrs=20.0,
+                progress_pct=0.0,
+                status=WorkItemStatus.NOT_STARTED,
+                is_scope_changed=False,
+                scope_change_reason=None,
+            ),
+        ]
+
+        dependencies = [
+            Dependency(
+                dependency_id="D1",
+                predecessor_item_id="WI-001",
+                successor_item_id="WI-002",
+                dependency_type=DependencyType.FINISH_TO_START,
+                is_on_critical_path=True,
+                lag_days=0,
+                notes="Chain dependency",
+            )
+        ]
+
+        blockers = []
+        actuals = []
+
+        project_state = ProjectState(
+            project_id="GROWTH-001",
+            project_info=project_info,
+            team=team,
+            sprints=sprints,
+            work_items=work_items,
+            dependencies=dependencies,
+            blockers=blockers,
+            actuals=actuals,
+        )
+
+        dag = DependencyGraphEngine(project_state).build_dag()
+        cp_result = CriticalPathEngine(project_state, dag).analyze()
+
+        assert cp_result.critical_path == ["WI-001", "WI-002"]
+        assert cp_result.critical_path_items == cp_result.critical_path
+        assert cp_result.critical_path_duration_hours == 50.0
+        assert cp_result.critical_path_duration_hours_original == 30.0
+        assert cp_result.critical_path_growth_hours == 20.0
+        assert cp_result.critical_path_growth_percent == pytest.approx(66.6666667, rel=1e-3)
+
 
 class TestImpactScoringEngine:
     """Tests for ImpactScoringEngine."""

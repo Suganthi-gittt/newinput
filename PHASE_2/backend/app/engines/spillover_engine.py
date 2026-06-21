@@ -2,6 +2,29 @@
 Spillover Analysis Engine
 
 Predicts work items likely to carry over to next sprint.
+
+KNOWN LIMITATIONS (documented, not fixed in this pass — see audit discussion):
+1. predicted_spillover_by_sprint loops over every sprint in the project,
+   including already-completed sprints with stray leftover NOT_STARTED/
+   IN_PROGRESS items and not-yet-started future sprints. It does not
+   distinguish "this sprint is closed, any remaining item here is a data
+   hygiene issue" from "this sprint hasn't started, there's no track record
+   to spill from yet" from "this sprint is in flight and at real risk."
+2. avg_item_effort is a single project-wide average applied uniformly to
+   every sprint's excess-hours figure to derive an item count. On a project
+   with high item-size variance, this over/understates how many items will
+   actually spill in any given sprint.
+3. (FIXED below) avg_actual_velocity previously always took the lower of
+   planned-vs-historical-average velocity for every sprint, one-directionally
+   inflating predicted spillover on any deliberately over-planned sprint.
+4. spillover_probability (per-item, normal-CDF-based) and
+   predicted_spillover_by_sprint (per-sprint, flat threshold heuristic) are
+   two independent models of the same underlying risk and are not reconciled
+   against each other. They can disagree for the same sprint.
+5. spillover_confidence_intervals derives its margin of error from velocity
+   variance divided by an unexplained constant (5.0, "as sqrt(25)"), not from
+   the actual variance of the spillover prediction itself. Treat these
+   intervals as illustrative, not statistically rigorous.
 """
 
 from typing import Dict, List, Tuple, Any
@@ -172,8 +195,33 @@ class SpilloverAnalysisEngine:
             # Calculate total effort
             total_effort = sum(i.remaining_effort_hrs for i in spillover_candidates)
             
-            # Compare to planned velocity with variance
-            avg_actual_velocity = min(sprint.planned_velocity_hrs, avg_velocity)
+            # FIX (was: avg_actual_velocity = min(sprint.planned_velocity_hrs, avg_velocity)):
+            # min(planned, avg_velocity) ALWAYS returns whichever is lower, with no
+            # exception — so a sprint deliberately planned ABOVE the historical
+            # average (extra capacity allocated to absorb a known-heavy workload)
+            # was always capped DOWN to the historical average, every time,
+            # regardless of how much extra capacity was actually planned. That is
+            # a one-directional bias that systematically overstates excess effort,
+            # and therefore overstates predicted spillover, for every overplanned
+            # sprint — including some of this dataset's later sprints.
+            #
+            # Correct comparison: trust the sprint's own planned capacity by
+            # default. Only pull capacity down toward the historical average when
+            # the plan is unrealistically optimistic relative to demonstrated
+            # team output — defined here as planned capacity exceeding the
+            # historical average by more than a documented tolerance band
+            # (OVERPLAN_TOLERANCE), rather than capping at the historical average
+            # the instant the plan exceeds it by even a single hour.
+            planned_capacity = sprint.planned_velocity_hrs
+            OVERPLAN_TOLERANCE = 1.25  # plan can exceed historical avg by up to 25% before being treated as unrealistic
+            if avg_velocity > 0 and planned_capacity > avg_velocity * OVERPLAN_TOLERANCE:
+                # Plan is materially more optimistic than the team's track record
+                # supports — don't let an unrealistic plan hide real spillover risk.
+                avg_actual_velocity = avg_velocity * OVERPLAN_TOLERANCE
+            else:
+                # Plan is at, below, or only modestly above historical average —
+                # trust it; this is the case the original formula got wrong.
+                avg_actual_velocity = planned_capacity
             velocity_variance = avg_actual_velocity * self.velocity_std_dev_factor
             
             # Estimated spillover items (rough heuristic: items beyond capacity)

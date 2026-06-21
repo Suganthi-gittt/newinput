@@ -198,7 +198,7 @@ def main():
         print(f"    • Best Case (P10)                   : {mc_result.best_case_finish_date.strftime('%Y-%m-%d')}")
         print(f"    • P80 Finish Date                   : {mc_result.p80_finish_date.strftime('%Y-%m-%d')}")
         print(f"    • P95 Finish Date                   : {mc_result.p95_finish_date.strftime('%Y-%m-%d')}")
-        print(f"    • Worst Case (P90)                  : {mc_result.worst_case_finish_date.strftime('%Y-%m-%d')}")
+        print(f"    • P90 Finish Date                   : {mc_result.p90_finish_date.strftime('%Y-%m-%d')}")
         print(f"    • Mean Delay (days)                 : {mc_result.statistics.mean_delay_days:.1f}")
         print(f"    • Median Delay (days)               : {mc_result.statistics.median_delay_days:.1f}")
     except Exception as e:

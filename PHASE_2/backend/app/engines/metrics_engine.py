@@ -56,7 +56,26 @@ class ProjectMetrics(BaseModel):
     critical_path_length: int
     
     # Spillover metrics
+    #
+    # NAMING CLARIFICATION (these two fields answer DIFFERENT questions and
+    # are NOT alternative estimates of the same quantity — do not compare
+    # them directly, and do not expect them to roughly agree):
+    #
+    # expected_spillover_items: despite the forward-looking name, this is
+    # actually sum(a.carryover_count for a in actuals) — a HISTORICAL total
+    # of how many items carried over across sprints that already have
+    # recorded actuals (i.e. completed + current in-progress sprint). It is
+    # backward-looking. Kept under its original name for backward
+    # compatibility with existing callers; see historical_total_carryover_items
+    # below for the same value under an accurate name.
+    #
+    # For the FORWARD-LOOKING prediction of how many items are expected to
+    # spill across remaining/future sprints, use
+    # SpilloverAnalysisEngine.predicted_spillover_by_sprint (summed) /
+    # ForecastResult.predicted_spillover_items instead — that is a model
+    # output over future sprints, not a historical tally.
     expected_spillover_items: int
+    historical_total_carryover_items: int  # = expected_spillover_items, accurately named
     historical_carryover_rate: float
 
 
@@ -112,7 +131,12 @@ class MetricsEngine:
         completed_sprints = sum(1 for s in sprints if s.status == SprintStatus.COMPLETED)
         current_sprint_num = self._get_current_sprint_number(sprints)
         
-        # Spillover metrics (from historical actuals)
+        # Spillover metrics (HISTORICAL — from sprints with recorded actuals).
+        # This is a backward-looking tally of items that have already carried
+        # over historically. It is NOT a prediction of future spillover; for
+        # that, see SpilloverAnalysisEngine.predicted_spillover_by_sprint,
+        # which is a separate, forward-looking model over remaining sprints
+        # and will not generally match this historical figure.
         expected_spillover = sum(a.carryover_count for a in actuals)
         historical_carryover_rate = (
             expected_spillover / len(actuals) if len(actuals) > 0 else 0.0
@@ -147,6 +171,7 @@ class MetricsEngine:
             dependency_count=len(self.project_state.dependencies),
             critical_path_length=0,  # Will be set by CriticalPathEngine
             expected_spillover_items=expected_spillover,
+            historical_total_carryover_items=expected_spillover,
             historical_carryover_rate=historical_carryover_rate,
         )
     

@@ -939,8 +939,8 @@ export default function SprintWhispererDashboard() {
                 <span>{formatDate(dashboardData?.monteCarlo?.p80_finish_date)}</span>
               </div>
               <div className="flex justify-between pb-3">
-                <span>Worst Case (P90)</span>
-                <span>{formatDate(dashboardData?.monteCarlo?.worst_case_finish_date)}</span>
+                <span>P90 Finish Date</span>
+                <span>{formatDate(dashboardData?.monteCarlo?.p90_finish_date)}</span>
               </div>
             </div>
             <div className="mt-8 rounded-3xl bg-slate-950/80 p-6 text-center">

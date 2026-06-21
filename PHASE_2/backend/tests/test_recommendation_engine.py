@@ -287,6 +287,9 @@ def test_blocker_recommendations(recommendation_engine):
     assert blocker_recs
     assert blocker_recs[0].target_ids == ["BLK-01"]
     assert "BLK-01" in blocker_recs[0].action
+    assert blocker_recs[0].category == BlockerCategory.OTHER.value
+    assert blocker_recs[0].recommended_actions
+    assert isinstance(blocker_recs[0].recommended_actions, list)
     assert blocker_recs[0].after_probability >= 0.0
 
 
@@ -336,6 +339,8 @@ def test_simulation_and_ranking(recommendation_engine):
     assert 0.0 <= before_prob <= 1.0
     assert 0.0 <= after_prob <= 1.0
     assert isinstance(candidates[0].expected_probability_gain, float)
+    assert all(c.impact_confidence in {"High", "Medium", "Low"} for c in candidates)
+    assert all(c.impact_classification in {"Positive Impact", "Negative Impact", "Negligible Impact"} for c in candidates)
 
 
 def test_simulate_scenario(recommendation_engine):

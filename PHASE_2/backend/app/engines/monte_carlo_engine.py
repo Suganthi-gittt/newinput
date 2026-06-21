@@ -118,8 +118,8 @@ class MonteCarloEngine:
             most_likely_finish_date=statistics_obj.percentile_50,  # Use from statistics
             best_case_finish_date=statistics_obj.percentile_10,    # Use from statistics
             p80_finish_date=statistics_obj.percentile_80,          # 80% of outcomes ≤ this
+            p90_finish_date=statistics_obj.percentile_90,          # 90% of outcomes ≤ this
             p95_finish_date=statistics_obj.percentile_95,          # 95% of outcomes ≤ this
-            worst_case_finish_date=statistics_obj.percentile_90,   # Use from statistics
         )
 
     def _run_simulation(self) -> datetime:
@@ -137,19 +137,46 @@ class MonteCarloEngine:
         cp_remaining_hours = float(getattr(self.cp_result, "critical_path_remaining_hours", 0.0) or 0.0)
         adjusted_remaining = max(remaining_work, cp_remaining_hours)
 
-        # 4) Add spillover impact with random variation
+        # 4) Spillover: sample how much of the predicted spillover materializes
+        # this trial, then fold it into THIS TRIAL'S velocity as a throughput
+        # penalty — not as a separate additive days term.
+        #
+        # MODELING NOTE (mirrors ForecastEngine's fix — keep both in sync):
+        # Spillover does not create a second, parallel block of work added on
+        # top of the remaining-effort schedule; it represents capacity mismatch
+        # (work re-entering the backlog instead of completing), which reduces
+        # how much real progress the team makes per sprint. Previously this engine
+        # computed `spillover_delay_days` independently (same units, same scale as
+        # `remaining_days`) and added it on top — duplicating the same effort
+        # against two convergent schedule terms, randomized fresh on every trial.
+        # That widened the simulated spread and shifted the whole distribution
+        # later on every run. We now apply the same velocity-erosion model the
+        # deterministic ForecastEngine uses, sampled per-trial via spillover_factor
+        # so Monte Carlo still captures spillover *variance* (0% to 100% of
+        # predicted spillover materializing), just without double counting it.
         avg_item_effort = float(getattr(self.metrics, "average_item_effort", 20.0) or 20.0)
         spillover_hours = 0.0
+        spillover_factor = 0.0
         if self.spillover:
             try:
                 total_spill = sum(self.spillover.predicted_spillover_by_sprint.values())
-                # Add 0-100% random spillover (sometimes items don't spill)
+                # Sample 0-100% random spillover materialization (sometimes items don't spill)
                 spillover_factor = random.uniform(0.0, 1.0)
                 spillover_hours = float(total_spill) * avg_item_effort * spillover_factor
             except Exception:
                 spillover_hours = 0.0
+                spillover_factor = 0.0
 
-        adjusted_remaining += spillover_hours
+        # spillover_fraction: this trial's spillover-driven share of remaining
+        # effort, capped at 0.5 so a single trial's velocity can never be driven
+        # to near-zero by spillover alone. Mirrors ForecastEngine's cap exactly.
+        spillover_fraction = (
+            min(0.5, spillover_hours / base_remaining) if base_remaining > 0 else 0.0
+        )
+        # Must match ForecastEngine.SPILLOVER_VELOCITY_DAMPING — keep these two
+        # constants identical or the deterministic and probabilistic forecasts
+        # will disagree on how hard spillover bites for the same input data.
+        SPILLOVER_VELOCITY_DAMPING = 0.5
 
         # 5) Base velocity with random variation (normal distribution)
         base_velocity = float(
@@ -159,9 +186,14 @@ class MonteCarloEngine:
         blocker_impact_max = float(getattr(self.metrics, "estimated_blocker_velocity_impact", 0.0) or 0.0)
         blocker_impact_actual = random.uniform(0.0, blocker_impact_max)
 
-        # Blockers reduce MEAN velocity (consistent with deterministic forecast)
-        # Variance is from natural velocity fluctuation only
-        mean_velocity = base_velocity * (1.0 - blocker_impact_actual)
+        # Blockers AND spillover both reduce MEAN velocity (consistent with the
+        # deterministic forecast). Natural velocity fluctuation is layered on
+        # top via the random.gauss draw below.
+        mean_velocity = (
+            base_velocity
+            * (1.0 - blocker_impact_actual)
+            * (1.0 - spillover_fraction * SPILLOVER_VELOCITY_DAMPING)
+        )
         mean_velocity = max(mean_velocity, base_velocity * 0.25)
 
         projected_velocity = max(
@@ -172,7 +204,11 @@ class MonteCarloEngine:
             base_velocity * 0.25,
         )
 
-        # 7) Calculate remaining sprints and days
+        # 7) Calculate remaining sprints and days. Spillover's effect is now
+        # fully expressed through the eroded projected_velocity above — there
+        # is no separate additive spillover_delay_days term added to the
+        # schedule. spillover_hours/spillover_factor are retained only as
+        # inputs to the erosion calculation, not as a standalone days figure.
         remaining_sprints = adjusted_remaining / projected_velocity if projected_velocity > 0 else float('inf')
         sprint_days = float(self.project_state.project_info.sprint_duration_days or 14)
         remaining_days = remaining_sprints * sprint_days
@@ -182,6 +218,7 @@ class MonteCarloEngine:
         days_elapsed = self._calculate_schedule_elapsed_days(sprint_days)
 
         # Expected finish = project_start + elapsed + remaining
+        # (spillover already baked into remaining_days via projected_velocity)
         expected_finish = project_start + timedelta(days=days_elapsed + remaining_days)
 
         return expected_finish
