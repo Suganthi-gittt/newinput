@@ -44,8 +44,12 @@ export const api = {
     const resp = await fetch(`${API_ROOT}/demo/reset`,{method:'POST'})
     return unwrapResponse(resp)
   },
-  metrics: async ()=>{
-    const resp = await fetch(`${API_ROOT}/metrics`)
+  metrics: async (sessionId='')=>{
+    let url = `${API_ROOT}/metrics`
+    if(sessionId){
+      url += `?session_id=${encodeURIComponent(sessionId)}`
+    }
+    const resp = await fetch(url)
     return unwrapResponse(resp)
   },
   dependencies: async (sessionId='')=>{
@@ -60,12 +64,20 @@ export const api = {
     const resp = await fetch(`${API_ROOT}/spillover`)
     return unwrapResponse(resp)
   },
-  forecast: async ()=>{
-    const resp = await fetch(`${API_ROOT}/forecast`)
+  forecast: async (sessionId='')=>{
+    let url = `${API_ROOT}/forecast`
+    if(sessionId){
+      url += `?session_id=${encodeURIComponent(sessionId)}`
+    }
+    const resp = await fetch(url)
     return unwrapResponse(resp)
   },
-  monteCarlo: async ()=>{
-    const resp = await fetch(`${API_ROOT}/monte-carlo`)
+  monteCarlo: async (sessionId='')=>{
+    let url = `${API_ROOT}/monte-carlo`
+    if(sessionId){
+      url += `?session_id=${encodeURIComponent(sessionId)}`
+    }
+    const resp = await fetch(url)
     return unwrapResponse(resp)
   },
   risk: async (sessionId='')=>{
@@ -76,16 +88,28 @@ export const api = {
     const resp = await fetch(url)
     return unwrapResponse(resp)
   },
-  recommendations: async ()=>{
-    const resp = await fetch(`${API_ROOT}/recommendations`)
+  recommendations: async (sessionId='')=>{
+    let url = `${API_ROOT}/recommendations`
+    if(sessionId){
+      url += `?session_id=${encodeURIComponent(sessionId)}`
+    }
+    const resp = await fetch(url)
     return unwrapResponse(resp)
   },
-  simulateRecommendation: async (body)=>{
-    const resp = await fetch(`${API_ROOT}/recommendations/simulate`,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
+  simulateRecommendation: async (body, sessionId='')=>{
+    let url = `${API_ROOT}/recommendations/simulate`
+    if(sessionId){
+      url += `?session_id=${encodeURIComponent(sessionId)}`
+    }
+    const resp = await fetch(url,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
     return unwrapResponse(resp)
   },
-  simulateScenario: async (body)=>{
-    const resp = await fetch(`${API_ROOT}/recommendations/scenario`,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
+  simulateScenario: async (body, sessionId='')=>{
+    let url = `${API_ROOT}/recommendations/scenario`
+    if(sessionId){
+      url += `?session_id=${encodeURIComponent(sessionId)}`
+    }
+    const resp = await fetch(url,{method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
     return unwrapResponse(resp)
   },
   scopeChange: async (body)=>{

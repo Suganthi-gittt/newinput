@@ -1,50 +1,8 @@
-import React, {useEffect, useState} from 'react'
-import { api } from '../../api/client'
+import React from 'react'
 
-export default function MetricsRow({session}){
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-  const [metrics, setMetrics] = useState(null)
-
-  useEffect(()=>{
-    let mounted = true
-    setLoading(true)
-    api.metrics().then(m=>{ if(mounted){ setMetrics(m); setLoading(false) }}).catch(err=>{ if(mounted){ setError(err); setLoading(false) }})
-    return ()=>{ mounted=false }
-  }, [session && session.session_id])
-
-  if(loading){
-    return (
-      <>
-        <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
-          <div className="text-sm uppercase tracking-[0.2em] text-slate-400">Completion %</div>
-          <div className="mt-3 text-2xl font-semibold text-white">—</div>
-        </div>
-        <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
-          <div className="text-sm uppercase tracking-[0.2em] text-slate-400">Remaining effort</div>
-          <div className="mt-3 text-2xl font-semibold text-white">—</div>
-        </div>
-      </>
-    )
-  }
-
-  if(error || !metrics){
-    return (
-      <>
-        <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
-          <div className="text-sm uppercase tracking-[0.2em] text-slate-400">Completion %</div>
-          <div className="mt-3 text-2xl font-semibold text-white">—</div>
-        </div>
-        <div className="rounded-2xl border border-slate-700 bg-slate-900 p-4">
-          <div className="text-sm uppercase tracking-[0.2em] text-slate-400">Remaining effort</div>
-          <div className="mt-3 text-2xl font-semibold text-white">—</div>
-        </div>
-      </>
-    )
-  }
-
-  const completionPct = typeof metrics.completion_pct === 'number' ? Math.round(metrics.completion_pct * 100) : null
-  const remainingHours = typeof metrics.remaining_effort_hours === 'number' ? metrics.remaining_effort_hours : null
+export default function MetricsRow({metrics}){
+  const completionPct = typeof metrics?.completion_pct === 'number' ? Math.round(metrics.completion_pct * 100) : null
+  const remainingHours = typeof metrics?.remaining_effort_hours === 'number' ? metrics.remaining_effort_hours : null
   const personDays = remainingHours !== null ? Math.round((remainingHours/8) * 10)/10 : null
 
   return (

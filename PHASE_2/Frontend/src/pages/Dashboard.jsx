@@ -18,7 +18,7 @@ function MetricCard({label, value}){
   )
 }
 
-function OverviewPage({session}){
+function OverviewPage({session, metrics}){
   const summary = session.project_summary
   return (
     <div>
@@ -40,7 +40,7 @@ function OverviewPage({session}){
           <MetricCard label="Work items" value={summary.total_work_items} />
           <MetricCard label="Dependencies" value={summary.total_dependencies} />
           <MetricCard label="Blockers" value={summary.total_blockers} />
-          <MetricsRow session={session} />
+          <MetricsRow metrics={metrics} />
         </div>
       </section>
     </div>
@@ -52,12 +52,18 @@ function HeroBanner({session}){
   const [error, setError] = useState(null)
   const [forecast, setForecast] = useState(null)
   const [mc, setMc] = useState(null)
+  const sessionId = session?.project_summary?.session_id || ''
 
   const fetchData = async ()=>{
+    if(!sessionId){
+      setError(new Error('Missing session id'))
+      setLoading(false)
+      return
+    }
     setLoading(true)
     setError(null)
     try{
-      const [f, m] = await Promise.all([api.forecast(), api.monteCarlo()])
+      const [f, m] = await Promise.all([api.forecast(sessionId), api.monteCarlo(sessionId)])
       setForecast(f?.forecast ?? f)
       setMc(m?.monte_carlo ?? m)
       setLoading(false)
@@ -69,8 +75,7 @@ function HeroBanner({session}){
 
   useEffect(()=>{
     fetchData()
-    // refetch when session changes
-  }, [session && session.session_id])
+  }, [sessionId])
 
   // Loading state
   if(loading){
@@ -178,12 +183,19 @@ function ProjectSummaryCard({session}){
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
+  const sessionId = session?.project_summary?.session_id || ''
+
   useEffect(()=>{
     let mounted = true
+    if(!sessionId){
+      setError(new Error('Missing session id'))
+      setLoading(false)
+      return () => { mounted = false }
+    }
     setLoading(true)
-    api.forecast().then(f=>{ if(mounted){ setForecast(f?.forecast ?? f); setLoading(false) }}).catch(err=>{ if(mounted){ setError(err); setLoading(false) }})
+    api.forecast(sessionId).then(f=>{ if(mounted){ setForecast(f?.forecast ?? f); setLoading(false) }}).catch(err=>{ if(mounted){ setError(err); setLoading(false) }})
     return ()=>{ mounted=false }
-  }, [session && session.session_id])
+  }, [sessionId])
 
   if(loading) return (
     <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6">
@@ -258,15 +270,22 @@ function MonteCarloStrip({session}){
   const [error, setError] = useState(null)
   const [mc, setMc] = useState(null)
 
+  const sessionId = session?.project_summary?.session_id || ''
+
   useEffect(()=>{
     let mounted = true
+    if(!sessionId){
+      setError(new Error('Missing session id'))
+      setLoading(false)
+      return () => { mounted = false }
+    }
     setLoading(true)
     setError(null)
-    api.monteCarlo()
+    api.monteCarlo(sessionId)
       .then(response=>{ if(mounted){ setMc(response?.monte_carlo ?? response); setLoading(false) }})
       .catch(err=>{ if(mounted){ setError(err); setLoading(false) }})
     return ()=>{ mounted = false }
-  }, [session && session.session_id])
+  }, [sessionId])
 
   if(loading){
     return (
@@ -286,7 +305,7 @@ function MonteCarloStrip({session}){
             <h2 className="mt-2 text-2xl font-semibold text-rose-100">Unable to load simulations</h2>
             <p className="mt-2 text-sm text-rose-300">{error.message || 'Monte Carlo data could not be retrieved.'}</p>
           </div>
-          <button onClick={()=>{ setLoading(true); setError(null); api.monteCarlo().then(response=>{ setMc(response?.monte_carlo ?? response); setLoading(false)}).catch(err=>{ setError(err); setLoading(false) }) }} className="rounded-2xl border border-rose-500 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-200">Retry</button>
+          <button onClick={()=>{ setLoading(true); setError(null); api.monteCarlo(sessionId).then(response=>{ setMc(response?.monte_carlo ?? response); setLoading(false)}).catch(err=>{ setError(err); setLoading(false) }) }} className="rounded-2xl border border-rose-500 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-200">Retry</button>
         </div>
       </section>
     )
@@ -354,15 +373,22 @@ function DelayDiagnosis({session}){
   const [error, setError] = useState(null)
   const [forecast, setForecast] = useState(null)
 
+  const sessionId = session?.project_summary?.session_id || ''
+
   useEffect(()=>{
     let mounted = true
+    if(!sessionId){
+      setError(new Error('Missing session id'))
+      setLoading(false)
+      return () => { mounted = false }
+    }
     setLoading(true)
     setError(null)
-    api.forecast()
+    api.forecast(sessionId)
       .then(f=>{ if(mounted){ setForecast(f?.forecast ?? f); setLoading(false) }})
       .catch(err=>{ if(mounted){ setError(err); setLoading(false) }})
     return ()=>{ mounted = false }
-  }, [session && session.session_id])
+  }, [sessionId])
 
   if(loading){
     return (
@@ -382,7 +408,7 @@ function DelayDiagnosis({session}){
             <h2 className="mt-2 text-2xl font-semibold text-rose-100">Unable to load diagnostics</h2>
             <p className="mt-2 text-sm text-rose-300">{error.message || 'Forecast diagnostics could not be retrieved.'}</p>
           </div>
-          <button onClick={()=>{ setLoading(true); setError(null); api.forecast().then(f=>{ setForecast(f?.forecast ?? f); setLoading(false)}).catch(err=>{ setError(err); setLoading(false) }) }} className="rounded-2xl border border-rose-500 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-200">Retry</button>
+          <button onClick={()=>{ setLoading(true); setError(null); api.forecast(sessionId).then(f=>{ setForecast(f?.forecast ?? f); setLoading(false)}).catch(err=>{ setError(err); setLoading(false) }) }} className="rounded-2xl border border-rose-500 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-200">Retry</button>
         </div>
       </section>
     )
@@ -449,6 +475,321 @@ function DelayDiagnosis({session}){
         <div className="mt-4 text-sm text-slate-500">Note: {forecast.forecast_vs_montecarlo_note}</div>
       )}
     </section>
+  )
+}
+
+function ForecastPage({session}){
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [forecast, setForecast] = useState(null)
+  const [mc, setMc] = useState(null)
+  const sessionId = session?.project_summary?.session_id || ''
+
+  useEffect(()=>{
+    let mounted = true
+    if(!sessionId){
+      setError(new Error('Missing session id'))
+      setLoading(false)
+      return () => { mounted = false }
+    }
+    setLoading(true)
+    setError(null)
+    Promise.all([api.forecast(sessionId), api.monteCarlo(sessionId)])
+      .then(([f, m])=>{ if(mounted){ setForecast(f?.forecast ?? f); setMc(m?.monte_carlo ?? m); setLoading(false) }})
+      .catch(err=>{ if(mounted){ setError(err); setLoading(false) }})
+    return ()=>{ mounted = false }
+  }, [sessionId])
+
+  if(loading){
+    return (
+      <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6 shadow-inner shadow-black/20">
+        <p className="text-sm uppercase tracking-[0.3em] text-amber-400">Forecast</p>
+        <p className="mt-3 text-sm text-slate-400">Loading forecast and Monte Carlo details…</p>
+      </section>
+    )
+  }
+
+  if(error){
+    return (
+      <section className="rounded-3xl border border-rose-600 bg-rose-900/10 p-6 shadow-inner shadow-black/20">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm uppercase tracking-[0.3em] text-rose-400">Forecast</p>
+            <h2 className="mt-2 text-2xl font-semibold text-rose-100">Unable to load forecast data</h2>
+            <p className="mt-2 text-sm text-rose-300">{error.message || 'Failed to retrieve forecast or Monte Carlo results.'}</p>
+          </div>
+          <button onClick={()=>{ setLoading(true); setError(null); Promise.all([api.forecast(sessionId), api.monteCarlo(sessionId)]).then(([f,m])=>{ setForecast(f?.forecast ?? f); setMc(m?.monte_carlo ?? m); setLoading(false)}).catch(err=>{ setError(err); setLoading(false) }) }} className="rounded-2xl border border-rose-500 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-200">Retry</button>
+        </div>
+      </section>
+    )
+  }
+
+  if(!forecast && !mc){
+    return (
+      <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6">
+        <p className="text-sm uppercase tracking-[0.3em] text-amber-400">Forecast</p>
+        <p className="mt-3 text-sm text-slate-400">No forecast or Monte Carlo results are available for this session.</p>
+      </section>
+    )
+  }
+
+  // Percentile timeline
+  const stats = mc && mc.statistics ? mc.statistics : null
+  const percentiles = stats ? [10,25,50,75,80,90,95].map(p => ({ p, iso: stats[`percentile_${p}`] })) : []
+  const minIso = stats && stats.percentile_10 ? new Date(stats.percentile_10) : null
+  const maxIso = stats && stats.percentile_95 ? new Date(stats.percentile_95) : null
+  const rangeMs = minIso && maxIso ? (maxIso - minIso) : null
+
+  const formatDateLabel = (iso) => { if(!iso) return '—'; try{ return new Date(iso).toLocaleDateString(undefined, { day: '2-digit', month: 'short' }) }catch(e){ return iso } }
+
+  // Effort breakdown stats
+  const eb = forecast && forecast.effort_breakdown ? forecast.effort_breakdown : null
+  const effortItems = eb ? [
+    { key: 'raw', label: 'Raw remaining effort', value: eb.raw_remaining_effort_hours, color: 'bg-emerald-500', description: 'Raw remaining effort from open work.' },
+    { key: 'critical', label: 'Critical path remaining', value: eb.critical_path_remaining_hours, color: 'bg-sky-500', description: 'Remaining effort on the critical path.' },
+    { key: 'spillover', label: 'Spillover penalty (equivalent hours)', value: eb.spillover_penalty_hours, color: 'bg-amber-400', description: 'Equivalent hours from spillover impact.' },
+    { key: 'blocker', label: 'Blocker penalty (equivalent hours)', value: eb.blocker_penalty_hours, color: 'bg-rose-500', description: 'Equivalent hours from blocker impact.' },
+  ] : []
+  const adjusted = eb ? eb.forecast_adjusted_effort_hours : null
+
+  return (
+    <div className="space-y-6">
+      <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6 shadow-inner shadow-black/20">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm uppercase tracking-[0.3em] text-amber-400">Forecast</p>
+            <h2 className="mt-2 text-2xl font-semibold text-white">Finish-date distribution</h2>
+            <p className="mt-2 text-sm text-slate-400">Monte Carlo percentiles show likely completion windows.</p>
+          </div>
+          <div className="rounded-3xl border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-300">
+            {mc && mc.simulation_count ? `${mc.simulation_count.toLocaleString()} simulations` : 'Simulations'}
+          </div>
+        </div>
+
+        <div className="mt-6">
+          <div className="relative h-8 rounded-full bg-slate-800">
+            {minIso && maxIso && percentiles.map(pt => {
+              const iso = pt.iso
+              const left = iso ? Math.round(((new Date(iso) - minIso) / rangeMs) * 100) : 0
+              const color = pt.p === 50 ? 'bg-sky-500' : (pt.p <= 25 ? 'bg-emerald-500' : pt.p >= 90 ? 'bg-rose-500' : 'bg-amber-400')
+              return (
+                <div key={pt.p} className="absolute top-0 h-8 w-0">
+                  <div className={`absolute -top-3 h-14 w-0`} style={{ left: `${left}%` }}>
+                    <div className={`h-3 w-3 ${color} rounded-full border border-slate-900`} />
+                  </div>
+                </div>
+              )
+            })}
+            <div className="absolute inset-0 flex items-end justify-between px-2 text-xs text-slate-400">
+              <div>{formatDateLabel(stats?.percentile_10)}</div>
+              <div>{formatDateLabel(stats?.percentile_95)}</div>
+            </div>
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {percentiles.map(pt => (
+              <div key={pt.p} className="rounded-3xl border border-slate-700 bg-slate-950/80 p-3 text-center">
+                <div className="text-sm uppercase tracking-[0.2em] text-slate-400">P{pt.p}</div>
+                <div className="mt-2 text-lg font-semibold text-white">{formatDateLabel(pt.iso)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6 shadow-inner shadow-black/20">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm uppercase tracking-[0.3em] text-amber-400">Statistics</p>
+            <h2 className="mt-2 text-2xl font-semibold text-white">Mean & median delay</h2>
+            <p className="mt-2 text-sm text-slate-400">Comparison of mean and median delay vs target.</p>
+          </div>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-2">
+            <div className="rounded-3xl border border-slate-700 bg-slate-950/80 p-4 text-center">
+              <div className="text-sm text-slate-400">Mean delay</div>
+              <div className="mt-1 text-2xl font-semibold text-white">{stats?.mean_delay_days !== undefined ? `${stats.mean_delay_days.toFixed(1)}d` : '—'}</div>
+            </div>
+            <div className="rounded-3xl border border-slate-700 bg-slate-950/80 p-4 text-center">
+              <div className="text-sm text-slate-400">Median delay</div>
+              <div className="mt-1 text-2xl font-semibold text-white">{stats?.median_delay_days !== undefined ? `${stats.median_delay_days.toFixed(1)}d` : '—'}</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6 shadow-inner shadow-black/20">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm uppercase tracking-[0.3em] text-amber-400">Effort breakdown</p>
+            <h2 className="mt-2 text-2xl font-semibold text-white">Effort breakdown</h2>
+            <p className="mt-2 text-sm text-slate-400">Individual effort components and the forecast-adjusted effort value.</p>
+          </div>
+          <div className="text-sm text-slate-400">
+            Forecast-adjusted effort:
+            <div className="mt-1 font-semibold text-white">{adjusted ? `${Math.round(adjusted)}h` : '—'}</div>
+            <div className="mt-1 text-xs text-slate-500">Raw remaining + critical path uplift only</div>
+          </div>
+        </div>
+
+        <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {effortItems.map(item => (
+            <div key={item.key} className="rounded-3xl border border-slate-700 bg-slate-950/80 p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm text-slate-400">{item.label}</div>
+                  <div className="mt-2 text-3xl font-semibold text-white">{item.value !== undefined ? `${Math.round(item.value)}h` : '—'}</div>
+                </div>
+                <div className={`h-4 w-4 rounded-full ${item.color}`} />
+              </div>
+              <div className="mt-3 text-xs leading-5 text-slate-500">{item.description}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function ActionsPage({session}){
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [recs, setRecs] = useState([])
+  const [simulatingId, setSimulatingId] = useState(null)
+  const [simulationResult, setSimulationResult] = useState(null)
+  const [selected, setSelected] = useState([])
+
+  const sessionId = session?.project_summary?.session_id || ''
+
+  useEffect(()=>{
+    let mounted = true
+    if(!sessionId){
+      setError(new Error('Missing session id'))
+      setLoading(false)
+      return () => { mounted = false }
+    }
+    setLoading(true)
+    api.recommendations(sessionId).then(resp=>{ if(mounted){ setRecs(resp.recommendations || resp || []); setLoading(false) }}).catch(err=>{ if(mounted){ setError(err); setLoading(false) }})
+    return ()=> mounted = false
+  }, [sessionId])
+
+  const simulate = async (recommendation_id) => {
+    setSimulatingId(recommendation_id)
+    setSimulationResult(null)
+    try{
+      const body = { recommendation_id }
+      const resp = await api.simulateRecommendation(body, sessionId)
+      setSimulationResult(resp.simulation_result || resp)
+    }catch(err){
+      setError(err)
+    }finally{
+      setSimulatingId(null)
+    }
+  }
+
+  const runScenario = async () => {
+    if(selected.length === 0) return
+    setLoading(true)
+    try{
+      const resp = await api.simulateScenario({ recommendation_ids: selected.slice(0,3) }, sessionId)
+      setSimulationResult(resp.simulation_result || resp)
+    }catch(err){ setError(err) }finally{ setLoading(false) }
+  }
+
+  const toggleSelect = (id) => {
+    setSelected(prev => prev.includes(id) ? prev.filter(x=>x!==id) : [...prev.slice(-2), id])
+  }
+
+  if(loading) return (
+    <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6 shadow-inner shadow-black/20">
+      <p className="text-sm uppercase tracking-[0.3em] text-amber-400">Actions</p>
+      <p className="mt-3 text-sm text-slate-400">Loading recommendations…</p>
+    </section>
+  )
+
+  if(error) return (
+    <section className="rounded-3xl border border-rose-600 bg-rose-900/10 p-6 shadow-inner shadow-black/20">
+      <p className="text-sm uppercase tracking-[0.3em] text-rose-400">Actions</p>
+      <p className="mt-2 text-sm text-rose-300">{error.message || 'Failed to load recommendations.'}</p>
+    </section>
+  )
+
+  if(!recs || recs.length === 0) return (
+    <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6">
+      <p className="text-sm uppercase tracking-[0.3em] text-amber-400">Actions</p>
+      <p className="mt-3 text-sm text-slate-400">No recommendations are available for this session.</p>
+    </section>
+  )
+
+  return (
+    <div className="space-y-6">
+      <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm uppercase tracking-[0.3em] text-amber-400">Actions</p>
+            <h2 className="mt-2 text-2xl font-semibold text-white">Recommendations</h2>
+            <p className="mt-2 text-sm text-slate-400">Select recommendations to simulate their effect on delivery.</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button onClick={runScenario} disabled={selected.length===0} className="rounded-2xl border border-emerald-500 bg-emerald-500/10 px-4 py-2 text-sm font-semibold text-emerald-200">Simulate selection ({selected.length})</button>
+          </div>
+        </div>
+
+        <div className="mt-6 grid gap-4">
+          {recs.map(rec => (
+            <div key={rec.recommendation_id} className="rounded-3xl border border-slate-700 bg-slate-950/80 p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex-1">
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-400">{rec.impact_level}</div>
+                  <h3 className="mt-1 text-lg font-semibold text-white">{rec.action}</h3>
+                  <div className="mt-2 text-sm text-slate-300">{rec.impact_summary}</div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4 text-sm text-slate-400">
+                    <div>Effort: <span className="text-white font-semibold">{rec.implementation_effort}</span></div>
+                    <div>Confidence: <span className="text-white font-semibold">{rec.confidence}</span></div>
+                    <div>Priority: <span className="text-white font-semibold">{Math.round(rec.priority_score)}</span></div>
+                    <div>Impact: <span className="text-white font-semibold">{rec.impact_confidence || '—'}</span></div>
+                  </div>
+                </div>
+
+                <div className="flex flex-col items-end gap-2">
+                  <label className="inline-flex items-center gap-2 text-sm text-slate-400">
+                    <input type="checkbox" checked={selected.includes(rec.recommendation_id)} onChange={()=>toggleSelect(rec.recommendation_id)} />
+                    <span>Select</span>
+                  </label>
+                  <button onClick={()=>simulate(rec.recommendation_id)} disabled={!!simulatingId} className="rounded-2xl border border-sky-500 bg-sky-500/10 px-3 py-1 text-sm font-semibold text-sky-200">{simulatingId===rec.recommendation_id ? 'Simulating…' : 'Simulate this fix'}</button>
+                </div>
+              </div>
+
+              {simulationResult && simulationResult.recommendation_id === rec.recommendation_id && (
+                <div className="mt-4 rounded-2xl border border-emerald-500 bg-emerald-500/5 p-3">
+                  <div className="text-sm text-slate-300">Simulation result</div>
+                  <div className="mt-2 grid grid-cols-3 gap-3 text-sm">
+                    <div className="rounded-2xl bg-slate-900 p-2 text-center">
+                      <div className="text-xs text-slate-400">On-time probability</div>
+                      <div className="text-lg font-semibold text-white">{Math.round((simulationResult.after_probability||0)*100)}% <span className="text-slate-400">(was {Math.round((simulationResult.baseline_probability||0)*100)}%)</span></div>
+                    </div>
+                    <div className="rounded-2xl bg-slate-900 p-2 text-center">
+                      <div className="text-xs text-slate-400">Expected delay</div>
+                      <div className="text-lg font-semibold text-white">{(simulationResult.after_delay_days||0).toFixed(1)}d <span className="text-slate-400">(was {(simulationResult.baseline_delay_days||0).toFixed(1)}d)</span></div>
+                    </div>
+                    <div className="rounded-2xl bg-slate-900 p-2 text-center">
+                      <div className="text-xs text-slate-400">Risk score</div>
+                      <div className="text-lg font-semibold text-white">{Math.round(simulationResult.after_risk_score||0)} <span className="text-slate-400">(was {Math.round(simulationResult.baseline_risk_score||0)})</span></div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {simulationResult && simulationResult.scenario_recommendation_ids && simulationResult.scenario_recommendation_ids.length > 0 && (
+        <section className="rounded-3xl border border-slate-700 bg-slate-900 p-6">
+          <p className="text-sm uppercase tracking-[0.3em] text-amber-400">Scenario result</p>
+          <div className="mt-3 text-sm text-slate-300">Applied: {simulationResult.scenario_recommendation_ids.join(', ')}</div>
+        </section>
+      )}
+    </div>
   )
 }
 
@@ -853,6 +1194,23 @@ function SectionPlaceholder({title, description}){
 
 export function Dashboard({session, onReset}){
   const [active, setActive] = useState('overview')
+  const [metrics, setMetrics] = useState(null)
+  const [metricsLoading, setMetricsLoading] = useState(true)
+  const [metricsError, setMetricsError] = useState(null)
+  const sessionId = session?.project_summary?.session_id || ''
+
+  useEffect(()=>{
+    let mounted = true
+    if(!sessionId){
+      setMetricsError(new Error('Missing session id'))
+      setMetricsLoading(false)
+      return () => { mounted = false }
+    }
+    setMetricsLoading(true)
+    setMetricsError(null)
+    api.metrics(sessionId).then(m=>{ if(mounted){ setMetrics(m); setMetricsLoading(false) }}).catch(err=>{ if(mounted){ setMetricsError(err); setMetricsLoading(false) }})
+    return ()=>{ mounted = false }
+  }, [sessionId])
 
   if (!session) return null
 
@@ -879,13 +1237,13 @@ export function Dashboard({session, onReset}){
       </div>
 
       {active === 'overview' && <>
-        <OverviewPage session={session} />
+        <OverviewPage session={session} metrics={metrics} />
         <DelayDiagnosis session={session} />
       </>}
       {active === 'risk' && <RiskPage session={session} />}
       {active === 'critical-path' && <CriticalPathPage session={session} />}
-      {active === 'forecast' && <SectionPlaceholder title="Forecast" description="Forecast results and schedule risk will appear here." />}
-      {active === 'actions' && <SectionPlaceholder title="Actions" description="Recommendations and simulated fixes will be here soon." />}
+      {active === 'forecast' && <ForecastPage session={session} />}
+      {active === 'actions' && <ActionsPage session={session} />}
     </div>
   )
 }
