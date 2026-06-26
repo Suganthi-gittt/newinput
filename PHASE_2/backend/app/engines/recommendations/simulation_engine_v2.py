@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
-from app.domain.models import BlockerStatus, ProjectState
+from app.domain.models import Blocker, BlockerStatus, ProjectState, WorkItemStatus, WorkItem
 from app.engines.critical_path_engine import CriticalPathEngine, CriticalPathResult
 from app.engines.dependency_engine import DependencyDAG, DependencyGraphEngine
 from app.engines.forecast_engine import ForecastEngine, ForecastResult
@@ -57,6 +57,17 @@ class ActionApplicator:
             if blocker is not None:
                 blocker.status = BlockerStatus.RESOLVED
                 blocker.actual_resolution_date = blocker.raised_date
+                self._unblock_impacted_items(state, blocker)
+
+    def _unblock_impacted_items(self, state: ProjectState, blocker: Blocker) -> None:
+        for impacted_item_id in getattr(blocker, "impacted_item_ids", []) or []:
+            item = next((wi for wi in state.work_items if wi.item_id == impacted_item_id), None)
+            if item and item.status == WorkItemStatus.BLOCKED:
+                item.status = (
+                    WorkItemStatus.IN_PROGRESS
+                    if item.progress_pct > 0.0 or item.actual_effort_hrs > 0.0
+                    else WorkItemStatus.NOT_STARTED
+                )
 
     def _apply_reassign_item(self, state: ProjectState, rec: Recommendation) -> None:
         resource_id = rec.affected_resource_ids[0] if rec.affected_resource_ids else None
@@ -67,10 +78,34 @@ class ActionApplicator:
                 item.assigned_resource = resource_id
 
     def _apply_split_item(self, state: ProjectState, rec: Recommendation) -> None:
-        for item in state.work_items:
+        for item in list(state.work_items):
             if item.item_id in rec.affected_item_ids:
-                item.current_estimate_hrs = max(1.0, item.current_estimate_hrs / 2.0)
-                item.remaining_effort_hrs = max(0.0, item.remaining_effort_hrs / 2.0)
+                # Model splitting as two parallel items rather than shrinking scope in-place.
+                original_hours = float(item.current_estimate_hrs)
+                half_hours = max(1.0, original_hours / 2.0)
+
+                # Update the existing item to represent one half
+                item.current_estimate_hrs = half_hours
+                item.remaining_effort_hrs = max(0.0, float(item.remaining_effort_hrs) / 2.0)
+
+                # Create a new sibling work item representing the parallelized split
+                suffix = "-split"
+                new_id = item.item_id + suffix
+                # Ensure uniqueness by appending a numeric suffix if necessary
+                idx = 1
+                existing_ids = {wi.item_id for wi in state.work_items}
+                while new_id in existing_ids:
+                    new_id = f"{item.item_id}{suffix}{idx}"
+                    idx += 1
+
+                new_item = deepcopy(item)
+                new_item.item_id = new_id
+                new_item.current_estimate_hrs = half_hours
+                new_item.remaining_effort_hrs = max(0.0, float(new_item.remaining_effort_hrs) / 2.0)
+                new_item.progress_pct = 0.0
+                new_item.actual_effort_hrs = 0.0
+                # Keep same assigned sprint/resource so both can run in parallel
+                state.work_items.append(new_item)
 
     def _apply_advance_item(self, state: ProjectState, rec: Recommendation) -> None:
         for item in state.work_items:
@@ -101,7 +136,14 @@ class ActionApplicator:
             return
         for resource in state.team:
             if resource.resource_id == resource_id:
-                resource.primary_skill = "Python"
+                # Use the required skill if provided in the recommendation simulation params
+                req_skill = None
+                try:
+                    req_skill = rec.simulation_params.get("required_skill")
+                except Exception:
+                    req_skill = None
+                if req_skill:
+                    resource.primary_skill = req_skill
 
 
 class EngineRunner:
@@ -205,8 +247,27 @@ class SimulationEngineV2:
         )
         delta_on_time_probability = simulated_metrics.on_time_probability - baseline_metrics.on_time_probability
         delta_expected_delay_days = baseline_metrics.expected_delay_days - simulated_metrics.expected_delay_days
-        delta_spillover_risk = 0.0
+        # Compute spillover delta as the change in total predicted spillover items
+        try:
+            baseline_spill = sum(self.baseline.spillover.predicted_spillover_by_sprint.values())
+        except Exception:
+            baseline_spill = 0.0
+        try:
+            simulated_spill = sum(simulated.spillover.predicted_spillover_by_sprint.values())
+        except Exception:
+            simulated_spill = 0.0
+        delta_spillover_risk = float(baseline_spill - simulated_spill)
         delta_risk_score = baseline_metrics.overall_risk_score - simulated_metrics.overall_risk_score
+        # Projected velocity delta (positive means velocity recovered)
+        try:
+            baseline_velocity = float(self.baseline.forecast.projected_velocity)
+        except Exception:
+            baseline_velocity = 0.0
+        try:
+            simulated_velocity = float(simulated.forecast.projected_velocity)
+        except Exception:
+            simulated_velocity = 0.0
+        delta_projected_velocity = simulated_velocity - baseline_velocity
         is_positive_impact = (
             delta_on_time_probability > 0
             or delta_expected_delay_days > 0
@@ -220,6 +281,7 @@ class SimulationEngineV2:
             delta_expected_delay_days=round(delta_expected_delay_days, 4),
             delta_spillover_risk=round(delta_spillover_risk, 4),
             delta_risk_score=round(delta_risk_score, 4),
+            delta_projected_velocity=round(delta_projected_velocity, 2),
             seed_used=self.SEED,
             is_positive_impact=is_positive_impact,
             summary=(

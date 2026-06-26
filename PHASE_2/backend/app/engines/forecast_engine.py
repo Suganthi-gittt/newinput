@@ -235,6 +235,19 @@ class ForecastEngine:
         else:
             spillover_message = "No material spillover-driven schedule impact predicted."
 
+        # Derive blocker penalty hours from remaining_days_blocker_loss (days)
+        # Convert days -> hours using the blocker-only velocity (velocity_without_spillover / sprint_days)
+        try:
+            blocker_penalty_hours_calc = (
+                remaining_days_blocker_loss * (velocity_without_spillover / sprint_days)
+                if sprint_days > 0
+                else 0.0
+            )
+        except Exception:
+            blocker_penalty_hours_calc = 0.0
+
+        blocker_penalty_hours_final = min(float(adjusted_remaining), max(0.0, blocker_penalty_hours_calc))
+
         return ForecastResult(
             target_end_date=target_end_date,
             expected_finish_date=expected_finish,
@@ -248,7 +261,7 @@ class ForecastEngine:
             predicted_spillover_items=predicted_spillover_items,
             spillover_delay_days=float(round(spillover_delay_days, 2)),
             spillover_penalty_hours=spillover_hours,
-            blocker_penalty_hours=max(0.0, base_velocity - projected_velocity) * (adjusted_remaining / projected_velocity if projected_velocity > 0 else 0.0) if projected_velocity > 0 else 0.0,
+            blocker_penalty_hours=float(round(blocker_penalty_hours_final, 2)),
             forecast_adjusted_effort_hours=adjusted_remaining,
             scope_growth_hours=float(round(scope_growth_hours, 2)),
             scope_growth_percent=scope_growth_percent,
@@ -277,7 +290,7 @@ class ForecastEngine:
                 "raw_remaining_effort_hours": float(round(remaining_effort, 2)),
                 "critical_path_remaining_hours": float(round(cp_remaining_hours, 2)),
                 "spillover_penalty_hours": float(round(spillover_hours, 2)),
-                "blocker_penalty_hours": float(round(max(0.0, base_velocity - projected_velocity) * remaining_sprints if projected_velocity > 0 else 0.0, 2)),
+                "blocker_penalty_hours": float(round(blocker_penalty_hours_final, 2)),
                 "forecast_adjusted_effort_hours": float(round(adjusted_remaining, 2)),
             },
             forecast_vs_montecarlo_note=(

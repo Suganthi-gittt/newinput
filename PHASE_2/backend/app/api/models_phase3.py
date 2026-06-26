@@ -376,15 +376,6 @@ class RecommendationSummary(BaseModel):
     recommended_actions: List[str] = Field(default_factory=list, description="Category-aware recommended actions")
 
 
-class RecommendationResult(BaseModel):
-    session_id: str = Field(..., description="Session ID")
-    project_name: str = Field(..., description="Project name")
-    baseline_probability: float = Field(..., ge=0.0, le=1.0, description="Baseline on-time probability")
-    baseline_delay_days: float = Field(..., description="Baseline expected delay")
-    baseline_risk_score: float = Field(..., description="Baseline overall risk score")
-    recommendations: List[RecommendationSummary] = Field(default_factory=list, description="Ranked recommendations")
-
-
 class RecommendationSimulationRequest(BaseModel):
     recommendation_id: str = Field(..., description="Recommendation ID to simulate")
 
@@ -411,6 +402,15 @@ class RecommendationSimulationResult(BaseModel):
     baseline_risk_score: float = Field(..., description="Baseline overall risk score")
     after_risk_score: float = Field(..., description="Overall risk score after simulation")
     risk_reduction: float = Field(..., description="Risk score reduction")
+    baseline_schedule_risk: Optional[float] = Field(None, description="Baseline schedule risk score")
+    after_schedule_risk: Optional[float] = Field(None, description="Schedule risk score after simulation")
+    baseline_resource_risk: Optional[float] = Field(None, description="Baseline resource risk score")
+    after_resource_risk: Optional[float] = Field(None, description="Resource risk score after simulation")
+    delta_spillover_risk: Optional[float] = Field(None, description="Change in total predicted spillover items (baseline - after)")
+    delta_projected_velocity: Optional[float] = Field(None, description="Change in projected velocity (hours per sprint): after - baseline")
+    seed_used: int = Field(..., description="Monte Carlo seed used for reproducibility")
+    is_positive_impact: bool = Field(..., description="True if recommendation improves at least one key metric")
+    summary: str = Field(..., description="Human-readable summary of simulation result")
     scenario_recommendation_ids: Optional[List[str]] = Field(None, description="List of recommendation IDs simulated")
 
 

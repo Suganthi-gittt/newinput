@@ -14,7 +14,7 @@ and never invents risks or uses random numbers.
 from typing import List, Dict, Tuple, Optional
 from pydantic import BaseModel
 
-from app.domain.models import ProjectState, WorkItemStatus, SprintStatus
+from app.domain.models import ProjectState, WorkItemStatus, SprintStatus, BlockerSeverity
 from app.engines.metrics_engine import ProjectMetrics
 from app.engines.critical_path_engine import CriticalPathResult
 from app.engines.dependency_engine import DependencyDAG
@@ -67,7 +67,16 @@ class RiskEngine:
         self.impact_scores = impact_scores
         self.work_items = {wi.item_id: wi for wi in project_state.work_items}
 
-        # Weights for overall risk calculation
+        # Severity mapping and bonus used across dependency/sprint/recommendation logic
+        self.SEVERITY_SCORES = {
+            BlockerSeverity.CRITICAL: 40.0,
+            BlockerSeverity.HIGH: 20.0,
+            BlockerSeverity.MEDIUM: 10.0,
+            BlockerSeverity.LOW: 5.0,
+        }
+        self.ADDITIONAL_BLOCKER_BONUS = 3.0
+
+    # Weights for overall risk calculation
         self.weights = {
             "schedule": 0.40,
             "dependency": 0.25,
@@ -465,6 +474,31 @@ class RiskEngine:
                     )
                 )
 
+        # 5. Baseline for any active (unresolved) blocker present
+        # This is independent of structural dependency signals and ensures
+        # a baseline dependency risk when blockers exist in the project state.
+        active_blockers = [b for b in self.project_state.blockers if not b.actual_resolution_date]
+        if active_blockers:
+            # Severity-weighted baseline using configured mapping
+            highest_sev = max((b.severity for b in active_blockers), key=lambda s: list(self.SEVERITY_SCORES.keys()).index(s))
+            base = self.SEVERITY_SCORES.get(highest_sev, 15.0)
+            extra = self.ADDITIONAL_BLOCKER_BONUS * (len(active_blockers) - 1)
+            baseline_score = min(100.0, base + extra)
+            risk_components.append(baseline_score)
+            drivers.append(
+                RiskDriver(
+                    category="DEPENDENCY",
+                    score=baseline_score,
+                    title="Active Blocker Present",
+                    description=(
+                        f"{len(active_blockers)} unresolved blocker(s) present. "
+                        f"Highest severity: {highest_sev.value}. Baseline dependency risk applied."
+                    ),
+                    recommendation_hint="Resolve active blockers to remove baseline dependency exposure.",
+                )
+            )
+            reasons.append(f"{len(active_blockers)} active blocker(s); baseline {baseline_score:.1f}")
+
         # Average risk components
         if risk_components:
             dependency_score = sum(risk_components) / len(risk_components)
@@ -781,6 +815,17 @@ class RiskEngine:
             blocked_count = sum(
                 1 for wi in sprint_items if wi.status == WorkItemStatus.BLOCKED
             )
+
+            # Compute severity-weighted blocker exposure for this sprint by
+            # cross-referencing active blockers' impacted_item_ids with sprint items.
+            active_blockers = [b for b in self.project_state.blockers if not b.actual_resolution_date]
+            sprint_item_ids = {wi.item_id for wi in sprint_items}
+            severity_base = self.SEVERITY_SCORES
+            blocker_exposure = 0.0
+            for b in active_blockers:
+                if any(item_id in sprint_item_ids for item_id in b.impacted_item_ids):
+                    blocker_exposure += severity_base.get(b.severity, 15.0)
+            blocker_exposure = min(100.0, blocker_exposure)
             
             # Predicted spillover for this sprint
             predicted_spillover = self.spillover.predicted_spillover_by_sprint.get(
@@ -805,7 +850,7 @@ class RiskEngine:
 
             # Calculate sprint risk score
             sprint_score = self._calculate_single_sprint_risk_score(
-                sprint_utilization, blocked_count, predicted_spillover, sprint_dep_count
+                sprint_utilization, blocked_count, predicted_spillover, sprint_dep_count, blocker_exposure
             )
 
             sprint_risks.append(
@@ -828,6 +873,7 @@ class RiskEngine:
         blocked_count: int,
         spillover_count: float,
         dep_count: int,
+        blocker_exposure: float = 0.0,
     ) -> float:
         """Calculate risk for a single sprint."""
         components = []
@@ -845,6 +891,10 @@ class RiskEngine:
             components.append(min(100.0, (blocked_count - 5) * 10.0 + 50.0))
         elif blocked_count > 0:
             components.append(blocked_count * 10.0)
+
+        # Blocker exposure component: severity-weighted exposure from blockers
+        if blocker_exposure > 0.0:
+            components.append(min(100.0, blocker_exposure))
 
         # Spillover component
         if spillover_count > 5:

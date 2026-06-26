@@ -19,6 +19,7 @@ from app.domain.models import (
     WorkItemStatus,
     WorkItemType,
 )
+from app.engines.metrics_engine import MetricsEngine
 from app.engines.recommendations.models import (
     ConfidenceLevel,
     Recommendation,
@@ -219,3 +220,20 @@ def test_simulation_engine_v2_uses_clone_before_mutation():
     assert result.recommendation_ids == [recommendation.recommendation_id]
     assert state.blockers[0].status == BlockerStatus.OPEN
     assert state.work_items[1].status == WorkItemStatus.BLOCKED
+
+
+def test_simulation_engine_v2_resolve_blocker_unblocks_items():
+    state = make_project_state()
+    baseline = EngineRunner().run(state, simulation_count=100)
+    engine = SimulationEngineV2(project_state=state, baseline=baseline, simulation_count=100)
+
+    recommendation = make_recommendation()
+    clone = state.model_copy(deep=True)
+    engine.applicator.apply(clone, recommendation)
+
+    assert clone.blockers[0].actual_resolution_date is not None
+    assert clone.blockers[0].status == BlockerStatus.RESOLVED
+    assert clone.work_items[1].status != WorkItemStatus.BLOCKED
+
+    metrics_after = MetricsEngine(clone).calculate()
+    assert metrics_after.blocked_items == 0

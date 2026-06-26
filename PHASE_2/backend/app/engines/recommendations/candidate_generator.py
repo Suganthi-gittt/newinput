@@ -188,6 +188,14 @@ class CandidateGenerator:
         
         # Generate ADD_RESOURCE_SKILL candidate when gap is large
         if schedule_gap_hours > 20.0:
+            # Try to infer required skill from the top affected item for a richer candidate
+            required_skill = "General"
+            if signal.affected_item_ids:
+                item_id = signal.affected_item_ids[0]
+                item = next((wi for wi in self.project_state.work_items if wi.item_id == item_id), None)
+                if item and getattr(item, "required_skill", None):
+                    required_skill = item.required_skill
+
             candidates.append(self._build_candidate(
                 action_type=RecommendationAction.ADD_RESOURCE_SKILL,
                 title="Add resource capacity",
@@ -197,7 +205,7 @@ class CandidateGenerator:
                 affected_sprint_ids=signal.affected_sprint_ids,
                 affected_blocker_ids=signal.affected_blocker_ids,
                 root_signal_id=signal.signal_id,
-                simulation_params={"gap_hours": schedule_gap_hours},
+                simulation_params={"gap_hours": schedule_gap_hours, "required_skill": required_skill},
                 feasibility_checks={"budget_available": True},
             ))
         

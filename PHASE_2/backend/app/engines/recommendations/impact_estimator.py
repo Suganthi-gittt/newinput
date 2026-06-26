@@ -13,6 +13,15 @@ from app.engines.recommendations.models import (
 )
 
 
+# Severity mapping reused for recommendation impact estimation
+SEVERITY_SCORES = {
+    "Critical": 40.0,
+    "High": 20.0,
+    "Medium": 10.0,
+    "Low": 5.0,
+}
+
+
 class ImpactEstimator:
     def __init__(self, project_state: ProjectState, upstream: UpstreamEngineOutputs) -> None:
         self.project_state = project_state
@@ -37,14 +46,30 @@ class ImpactEstimator:
     def _estimate_resolve_blocker(self, candidate: RecommendationCandidate) -> ImpactEstimate:
         # Hours recovered: proportional share of remaining effort attributed to this one blocker.
         # active_blocker_count guard ensures we never divide by zero.
-        active_blocker_count = max(self.upstream.metrics.active_blocker_count, 1)
         blocker_velocity_impact = float(self.upstream.metrics.estimated_blocker_velocity_impact or 0.0)
 
-        # Each blocker's share of the compound velocity impact (simple even split across active blockers).
-        per_blocker_impact_share = blocker_velocity_impact / active_blocker_count
+        # Weight active blockers by severity to compute each blocker's relative share
+        active_blockers = [b for b in self.project_state.blockers if not b.actual_resolution_date]
+        active_blocker_count = max(len(active_blockers), 1)
+        if active_blockers:
+            total_weight = 0.0
+            by_id = {b.blocker_id: b for b in active_blockers}
+            for b in active_blockers:
+                total_weight += SEVERITY_SCORES.get(getattr(b.severity, 'value', str(b.severity)), 0.0)
+
+            # Find the first affected blocker id for this candidate (resolver targets one blocker)
+            target_blocker_id = candidate.affected_blocker_ids[0] if candidate.affected_blocker_ids else None
+            if target_blocker_id and target_blocker_id in by_id and total_weight > 0.0:
+                b = by_id[target_blocker_id]
+                weight = SEVERITY_SCORES.get(getattr(b.severity, 'value', str(b.severity)), 0.0)
+                per_blocker_impact_share = (weight / total_weight) * blocker_velocity_impact
+            else:
+                # Fallback to even split
+                per_blocker_impact_share = blocker_velocity_impact / active_blocker_count
+        else:
+            per_blocker_impact_share = 0.0
 
         # Delay days recoverable by resolving this one blocker.
-        # Proportional to its share of the total blocker-induced velocity drag.
         recoverable_delay_days = round(
             self.upstream.forecast.expected_delay_days * per_blocker_impact_share, 2
         )
@@ -66,7 +91,7 @@ class ImpactEstimator:
                 "estimated_blocker_velocity_impact",
                 blocker_velocity_impact,
                 0.0,
-                f"This blocker accounts for ~{round(per_blocker_impact_share * 100, 1)}% of total blocker velocity drag",
+                f"This blocker accounts for ~{round(per_blocker_impact_share * 100, 1)}% of total blocker velocity drag (severity-weighted)",
             )],
             notes=(
                 f"Resolving this blocker removes its share of the {round(blocker_velocity_impact * 100, 1)}% "

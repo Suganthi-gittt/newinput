@@ -234,6 +234,25 @@ def test_simulation_engine_resolve_blocker(simulation_engine):
     assert result.simulated_p80_date <= result.baseline_p80_date
 
 
+def test_simulation_engine_resolve_blocker_updates_work_item_status(simulation_engine):
+    action = SimulationAction(
+        action_id="REC-001",
+        action_type=RecommendationType.RESOLVE_BLOCKER.value,
+        target_ids=["BLK-01"],
+        details={"blocker_id": "BLK-01"},
+        impact_reason="Resolving BLK-01 removes an active blocker on the critical path.",
+    )
+    clone = simulation_engine.project_state.model_copy(deep=True)
+    simulation_engine._apply_resolve_blocker(clone, action)
+
+    assert clone.blockers[0].actual_resolution_date is not None
+    assert clone.blockers[0].status == BlockerStatus.RESOLVED
+    assert clone.work_items[1].status != WorkItemStatus.BLOCKED
+
+    metrics_after = MetricsEngine(clone).calculate()
+    assert metrics_after.blocked_items == 0
+
+
 def test_simulation_engine_add_capacity(simulation_engine):
     action = SimulationAction(
         action_id="REC-002",

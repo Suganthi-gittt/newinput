@@ -169,6 +169,7 @@ class SimulationResult:
     delta_expected_delay_days: float
     delta_spillover_risk: float
     delta_risk_score: float
+    delta_projected_velocity: float
     seed_used: int
     is_positive_impact: bool
     summary: str

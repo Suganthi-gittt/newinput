@@ -202,6 +202,17 @@ class SimulationEngine:
             return
         blocker.status = BlockerStatus.RESOLVED if hasattr(BlockerStatus, "RESOLVED") else blocker.status
         blocker.actual_resolution_date = datetime.utcnow()
+        self._unblock_impacted_items(clone, blocker)
+
+    def _unblock_impacted_items(self, clone: ProjectState, blocker: Blocker) -> None:
+        for impacted_item_id in getattr(blocker, "impacted_item_ids", []) or []:
+            item = next((wi for wi in clone.work_items if wi.item_id == impacted_item_id), None)
+            if item and item.status == WorkItemStatus.BLOCKED:
+                item.status = (
+                    WorkItemStatus.IN_PROGRESS
+                    if item.progress_pct > 0.0 or item.actual_effort_hrs > 0.0
+                    else WorkItemStatus.NOT_STARTED
+                )
 
     def _apply_reduce_scope(self, clone: ProjectState, action: SimulationAction) -> None:
         if not action.target_ids:
