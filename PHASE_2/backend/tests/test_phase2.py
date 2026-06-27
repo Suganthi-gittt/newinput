@@ -11,7 +11,7 @@ from app.domain.models import (
     ProjectInfo, Resource, Sprint, WorkItem, Dependency, Blocker, SprintActual, ProjectState,
     SkillLevel, WorkItemType, Priority, WorkItemStatus, SprintStatus, BlockerSeverity, BlockerStatus, BlockerCategory, DependencyType
 )
-from app.engines.metrics_engine import MetricsEngine
+from app.engines.metrics_engine import MetricsEngine, DeveloperMetrics
 from app.engines.dependency_engine import DependencyGraphEngine
 from app.engines.critical_path_engine import CriticalPathEngine
 from app.engines.impact_scoring_engine import ImpactScoringEngine
@@ -212,9 +212,17 @@ def sample_project_state():
             sprint_number=1,
             planned_effort_hrs=160.0,
             actual_effort_hrs=140.0,
+            variance_hrs=-20.0,
             tasks_planned=10,
             tasks_completed=8,
+            completion_rate=0.8,
             carryover_count=2,
+            carry_out_count=1,
+            carry_in_count=1,
+            carry_out_hours=10.0,
+            carry_in_hours=10.0,
+            scope_change_hours=5.0,
+            blocker_impact_hrs=3.0,
             notes="Good progress",
         ),
     ]
@@ -263,6 +271,89 @@ class TestMetricsEngine:
         
         # With only 1 actual, variance should be 0
         assert metrics.velocity_variance == 0.0
+
+    def test_enriched_metrics_are_exposed(self, sample_project_state):
+        """Historical, resource, blocker, dependency, planning, and downstream-input metrics should be exposed deterministically."""
+        metrics = MetricsEngine(sample_project_state).calculate()
+
+        assert metrics.executive_metrics.total_items == 4
+        assert metrics.executive_metrics.completion_pct == 0.25
+        assert metrics.executive_metrics.current_sprint_number == 2
+
+        assert metrics.work_metrics.total_effort_hours == 180.0
+        assert metrics.work_metrics.remaining_effort_hours == 110.0
+        assert metrics.work_metrics.completed_effort_hours == 40.0
+
+        assert len(metrics.sprint_metrics) == 2
+        assert metrics.sprint_metrics[0].planned_effort_hours == 160.0
+        assert metrics.sprint_metrics[0].completion_pct == 0.8
+
+        assert metrics.historical_metrics.planned_effort_hours == 160.0
+        assert metrics.historical_metrics.actual_effort_hours == 140.0
+        assert metrics.historical_metrics.effort_variance_hours == -20.0
+        assert metrics.historical_metrics.completion_rate == 0.8
+        assert metrics.historical_metrics.carry_in_count == 1
+        assert metrics.historical_metrics.carry_out_count == 1
+        assert metrics.historical_metrics.carryover_count == 2
+        assert metrics.historical_metrics.velocity_by_sprint[0] == 140.0
+
+        assert metrics.velocity_metrics.average_velocity == 140.0
+        assert metrics.velocity_metrics.velocity_by_sprint[0] == 140.0
+        assert metrics.velocity_metrics.velocity_stability_score >= 0.0
+
+        assert metrics.resource_metrics.team_size == 2
+        assert metrics.resource_metrics.estimation_accuracy_score >= 0.0
+        assert metrics.resource_metrics.allocation_efficiency_pct >= 0.0
+        assert len(metrics.resource_metrics.developer_metrics) == 2
+        assert all(isinstance(item, DeveloperMetrics) for item in metrics.resource_metrics.developer_metrics)
+
+        assert metrics.blocker_metrics.active_blocker_count == 1
+        assert metrics.blocker_metrics.dependency_related_blocker_count == 1
+        assert metrics.blocker_metrics.preventable_blocker_count == 0
+
+        assert metrics.dependency_metrics.dependency_count == 2
+        assert metrics.dependency_metrics.critical_dependency_density >= 0.0
+        assert metrics.dependency_metrics.cross_team_dependency_count >= 0
+
+        assert metrics.planning_metrics.planning_accuracy_score >= 0.0
+        assert metrics.planning_metrics.scope_volatility_score >= 0.0
+        assert metrics.planning_metrics.story_sizing_consistency_score >= 0.0
+
+        assert metrics.quality_metrics.defect_density >= 0.0
+        assert metrics.quality_metrics.rework_percentage >= 0.0
+
+        assert metrics.risk_input_metrics.blocker_density >= 0.0
+        assert metrics.risk_input_metrics.velocity_stability_score >= 0.0
+
+        assert metrics.forecast_input_metrics.remaining_story_count == 3
+        assert metrics.forecast_input_metrics.remaining_effort_hours == 110.0
+
+        assert metrics.recommendation_input_metrics.recurring_blockers >= 0
+        assert metrics.recommendation_input_metrics.critical_dependencies >= 0
+
+    def test_metrics_without_actuals_remain_deterministic(self, sample_project_state):
+        """Missing historical actuals should not introduce fabricated values."""
+        state = sample_project_state.model_copy(deep=True)
+        state.actuals = []
+
+        metrics = MetricsEngine(state).calculate()
+
+        assert metrics.historical_metrics.actual_effort_hours == 0.0
+        assert metrics.historical_metrics.velocity_by_sprint == []
+        assert metrics.forecast_input_metrics.remaining_sprints == 1
+        assert metrics.recommendation_input_metrics.recurring_blockers == 1
+
+    def test_scope_changes_and_resolved_blockers_are_exposed(self, sample_project_state):
+        """Scope changes and resolved blockers should be reflected as factual signals."""
+        state = sample_project_state.model_copy(deep=True)
+        state.work_items[2].is_scope_changed = True
+        state.blockers[0].actual_resolution_date = datetime(2025, 1, 10)
+
+        metrics = MetricsEngine(state).calculate()
+
+        assert metrics.planning_metrics.scope_volatility_score > 0.0
+        assert metrics.quality_metrics.requirement_volatility_score > 0.0
+        assert metrics.blocker_metrics.active_blocker_count == 0
 
     def test_estimate_blocker_velocity_impact_single_blocker(self):
         """A single blocker should have its base impact."""

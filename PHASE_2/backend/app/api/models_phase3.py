@@ -87,6 +87,54 @@ class ForecastEffortBreakdown(BaseModel):
     forecast_adjusted_effort_hours: float = Field(..., description="Adjusted effort used by the forecast calculation (critical path uplift only)")
 
 
+class ForecastConfidence(BaseModel):
+    """Deterministic forecast confidence derived from measurable historical indicators."""
+
+    confidence_score: float = Field(..., ge=0.0, le=1.0, description="Deterministic confidence score from historical predictability signals")
+    confidence_level: str = Field(..., description="HIGH, MEDIUM, or LOW")
+    confidence_reason: str = Field(..., description="Short human-readable reason for the confidence level")
+    confidence_inputs: Dict[str, float] = Field(default_factory=dict, description="Historical metrics used to calculate confidence")
+
+
+class ForecastDriver(BaseModel):
+    """A ranked deterministic contributor to forecast delay."""
+
+    name: str = Field(..., description="Contributor name")
+    impact: float = Field(..., description="Impact in forecast days")
+    reason: str = Field(..., description="Deterministic reason for the impact")
+    supporting_metrics: Dict[str, float] = Field(default_factory=dict, description="Metrics that support this driver")
+
+
+class ForecastEvidence(BaseModel):
+    """Structured evidence used to produce the deterministic forecast."""
+
+    name: str = Field(..., description="Evidence name")
+    value: Any = Field(..., description="Evidence value")
+    unit: str = Field(..., description="Unit of the evidence value")
+    source: str = Field(..., description="Source engine or metric set")
+
+
+class ForecastAssumptions(BaseModel):
+    """Machine-readable assumptions that govern the deterministic forecast."""
+
+    velocity_calculation_method: str = Field(..., description="Formula used to derive projected velocity")
+    blocker_adjustment_method: str = Field(..., description="Method used to model blocker impact on velocity")
+    spillover_adjustment_method: str = Field(..., description="Method used to model spillover impact on throughput")
+    critical_path_handling: str = Field(..., description="Method used to incorporate dependency sequencing")
+    timeline_anchoring: str = Field(..., description="Method used to anchor the forecast to schedule dates")
+    capacity_assumptions: Dict[str, float] = Field(default_factory=dict, description="Capacity-related assumption values")
+
+
+class ForecastExplanation(BaseModel):
+    """Structured explanation payload for downstream UI or AI layers."""
+
+    summary: str = Field(..., description="Short summary of the forecast outcome")
+    primary_driver: str = Field(..., description="Name of the largest forecast driver")
+    driver_names: List[str] = Field(default_factory=list, description="Ordered driver names")
+    confidence_note: str = Field(..., description="Confidence explanation derived from deterministic metrics")
+    delay_signal: str = Field(..., description="Whether the project is projected to be early, on track, or late")
+
+
 class ForecastResult(BaseModel):
     """Deterministic single-point forecast result."""
 
@@ -123,6 +171,11 @@ class ForecastResult(BaseModel):
         ),
     )
     effort_breakdown: ForecastEffortBreakdown = Field(..., description="Structured breakdown of forecast effort components")
+    confidence: ForecastConfidence = Field(..., description="Deterministic confidence score and supporting inputs")
+    forecast_drivers: List[ForecastDriver] = Field(default_factory=list, description="Ranked deterministic forecast contributors")
+    forecast_evidence: List[ForecastEvidence] = Field(default_factory=list, description="Structured evidence used to create the forecast")
+    forecast_assumptions: ForecastAssumptions = Field(..., description="Machine-readable assumptions used by the forecast")
+    forecast_explanation: ForecastExplanation = Field(..., description="Structured forecast explanation for downstream UI or AI consumers")
     forecast_vs_montecarlo_note: str = Field(
         ...,
         description=(

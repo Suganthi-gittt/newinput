@@ -9,7 +9,7 @@ from app.domain.models import (
 from app.engines.metrics_engine import MetricsEngine
 from app.engines.dependency_engine import DependencyGraphEngine
 from app.engines.critical_path_engine import CriticalPathEngine
-from app.engines.spillover_engine import SpilloverAnalysisEngine
+from app.engines.spillover_engine import SpilloverAnalysisEngine, SpilloverAnalysis
 from app.engines.forecast_engine import ForecastEngine
 
 
@@ -160,6 +160,114 @@ def test_forecast_deterministic():
     assert result1.expected_finish_date == result2.expected_finish_date
     assert result1.expected_delay_days == result2.expected_delay_days
     assert result1.on_track == result2.on_track
+
+
+def test_forecast_exposes_structured_explainability():
+    """Forecast output should include deterministic confidence, evidence, drivers, and assumptions."""
+    project_state = make_sample_project_state()
+
+    metrics = MetricsEngine(project_state).calculate()
+    dag = DependencyGraphEngine(project_state).build_dag()
+    cp = CriticalPathEngine(project_state, dag).analyze()
+    spill = SpilloverAnalysisEngine(project_state, metrics.average_item_effort).analyze()
+
+    result = ForecastEngine(project_state, metrics, cp, spill).calculate()
+
+    assert result.confidence is not None
+    assert 0.0 <= result.confidence.confidence_score <= 1.0
+    assert result.confidence.confidence_level in {"HIGH", "MEDIUM", "LOW"}
+    assert result.forecast_drivers
+    assert result.forecast_evidence
+    assert result.forecast_assumptions is not None
+    assert result.forecast_explanation is not None
+    assert result.forecast_drivers[0].impact >= result.forecast_drivers[-1].impact
+
+
+def test_no_blockers_leaves_velocity_unchanged():
+    """A project with no blockers should not incur blocker-based velocity loss."""
+    project_state = make_sample_project_state()
+    metrics = MetricsEngine(project_state).calculate()
+    metrics.estimated_blocker_velocity_impact = 0.0
+
+    dag = DependencyGraphEngine(project_state).build_dag()
+    cp = CriticalPathEngine(project_state, dag).analyze()
+    spill = SpilloverAnalysisEngine(project_state, metrics.average_item_effort).analyze()
+
+    result = ForecastEngine(project_state, metrics, cp, spill).calculate()
+
+    assert result.blocker_penalty_hours == 0.0
+    assert result.forecast_drivers[0].name != "Blockers"
+
+
+def test_large_spillover_reduces_projected_velocity():
+    """Large predicted spillover should lower projected velocity and increase delay."""
+    project_state = make_sample_project_state()
+    metrics = MetricsEngine(project_state).calculate()
+    dag = DependencyGraphEngine(project_state).build_dag()
+    cp = CriticalPathEngine(project_state, dag).analyze()
+    spill = SpilloverAnalysis(
+        spillover_probability={},
+        predicted_spillover_by_sprint={1: 10.0},
+        spillover_confidence_intervals={},
+        high_spillover_risk_items=[],
+        historical_carryover_rate=0.0,
+        historical_carryover_std_dev=0.0,
+        sprint_utilization_pct={},
+    )
+
+    result = ForecastEngine(project_state, metrics, cp, spill).calculate()
+
+    assert result.projected_velocity < metrics.actual_avg_velocity
+    assert any(driver.name == "Carryover" for driver in result.forecast_drivers)
+
+
+def test_scope_growth_increases_delay_driver():
+    """Scope growth should increase the scope driver impact and the forecast delay."""
+    project_state = make_sample_project_state()
+    project_state.work_items[0].current_estimate_hrs = 80.0
+    metrics = MetricsEngine(project_state).calculate()
+    dag = DependencyGraphEngine(project_state).build_dag()
+    cp = CriticalPathEngine(project_state, dag).analyze()
+    spill = SpilloverAnalysisEngine(project_state, metrics.average_item_effort).analyze()
+
+    result = ForecastEngine(project_state, metrics, cp, spill).calculate()
+
+    assert any(driver.name == "Scope Growth" for driver in result.forecast_drivers)
+    assert result.scope_growth_hours > 0.0
+
+
+def test_empty_historical_data_keeps_confidence_in_range():
+    """Forecast confidence should remain bounded even when no history is available."""
+    project_state = make_sample_project_state()
+    project_state.actuals = []
+    metrics = MetricsEngine(project_state).calculate()
+    dag = DependencyGraphEngine(project_state).build_dag()
+    cp = CriticalPathEngine(project_state, dag).analyze()
+    spill = SpilloverAnalysisEngine(project_state, metrics.average_item_effort).analyze()
+
+    result = ForecastEngine(project_state, metrics, cp, spill).calculate()
+
+    assert 0.0 <= result.confidence.confidence_score <= 1.0
+    assert result.confidence.confidence_level in {"HIGH", "MEDIUM", "LOW"}
+
+
+def test_zero_remaining_effort_forestalls_delay():
+    """A zero-remaining-effort project should not generate a positive delay from work remaining."""
+    project_state = make_sample_project_state()
+    project_state.work_items[0].remaining_effort_hrs = 0.0
+    project_state.work_items[0].actual_effort_hrs = 40.0
+    project_state.work_items[0].progress_pct = 1.0
+
+    metrics = MetricsEngine(project_state).calculate()
+    dag = DependencyGraphEngine(project_state).build_dag()
+    cp = CriticalPathEngine(project_state, dag).analyze()
+    spill = SpilloverAnalysisEngine(project_state, metrics.average_item_effort).analyze()
+
+    result = ForecastEngine(project_state, metrics, cp, spill).calculate()
+
+    assert result.remaining_effort_hours >= 0.0
+    assert result.expected_delay_days <= 0.0
+    assert result.completion_percentage >= 0.99
 
 
 def test_critical_path_remaining_hours():

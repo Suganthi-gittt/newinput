@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from app.domain.models import Blocker, ProjectState, SprintStatus
+from app.domain.models import Blocker, ProjectState, SprintStatus, WorkItemStatus
 from app.engines.critical_path_engine import CriticalPathResult
 from app.engines.dependency_engine import DependencyDAG
 from app.engines.forecast_engine import ForecastResult
@@ -190,62 +190,75 @@ class CapacityDetector:
         return signals
 
     def _load_ratio(self, resource: Any) -> float:
-        assigned_hours = self._assigned_remaining_hours(resource.resource_id)
-        capacity_hours = self._effective_remaining_capacity(resource)
-        return assigned_hours / max(capacity_hours, 1.0)
-
-    def _assigned_remaining_hours(self, resource_id: str) -> float:
-        """Calculate remaining hours assigned to resource.
-        
-        When remaining_effort_hrs is 0 (in-progress items), use current_estimate_hrs - actual_effort_hrs
         """
-        total = 0.0
-        for wi in self.project_state.work_items:
-            if wi.assigned_resource == resource_id:
-                remaining = float(wi.remaining_effort_hrs or 0.0)
-                if remaining == 0.0:
-                    # For in-progress items, calculate remaining as estimate - actual
-                    current_estimate = float(getattr(wi, "current_estimate_hrs", 0.0) or 0.0)
-                    actual_effort = float(getattr(wi, "actual_effort_hrs", 0.0) or 0.0)
-                    remaining = max(0.0, current_estimate - actual_effort)
-                total += remaining
-        return total
-
-    def _effective_remaining_capacity(self, resource: Any) -> float:
-        """Calculate effective remaining capacity using planned velocity × remaining sprints.
+        Compute load ratio from developer metrics in ProjectMetrics.
+        Load ratio = assigned_remaining_hrs / effective_remaining_capacity
         
-        Accounts for resource availability and allocation across future sprints.
+        Consumes directly from upstream metrics engine to avoid duplication.
         """
+        # Find this developer in the metrics
+        dev_metric = next(
+            (dm for dm in self.metrics.resource_metrics.developer_metrics 
+             if dm.resource_id == resource.resource_id),
+            None
+        )
+        
+        if dev_metric is None:
+            # Fallback if developer not found in metrics (shouldn't happen)
+            return 0.0
+        
+        # Use the developer's remaining effort from metrics
+        assigned_hours = dev_metric.remaining_effort_hours
+        
+        # Capacity: use forecast_input_metrics for remaining capacity calculation
+        # This accounts for remaining sprints and resource availability/allocation
+        remaining_sprints = float(
+            self.metrics.forecast_input_metrics.remaining_sprints or 1
+        )
+        capacity_per_sprint = float(
+            resource.daily_capacity_hrs or 0.0 
+        ) * (self.project_state.project_info.sprint_duration_days or 10)
+        
+        # Apply resource availability and allocation
         availability = float(getattr(resource, "availability_pct", 1.0) or 1.0)
         allocation = float(getattr(resource, "allocation_pct", 1.0) or 1.0)
+        effective_capacity = capacity_per_sprint * remaining_sprints * availability * allocation
         
-        # Count remaining sprints (not completed)
-        current_sprint_num = self.metrics.current_sprint_number if hasattr(self.metrics, 'current_sprint_number') else 1
-        remaining_sprints = 0
-        total_planned_velocity = 0.0
+        return assigned_hours / max(effective_capacity, 1.0)
+
+    def _assigned_remaining_hours(self, resource_id: str) -> float:
+        """
+        Get remaining hours assigned to resource from developer metrics.
         
-        for sprint in self.project_state.sprints:
-            sprint_num = getattr(sprint, "sprint_number", 0)
-            status = getattr(sprint, "status", None)
-            if sprint_num >= current_sprint_num and status != SprintStatus.COMPLETED:
-                remaining_sprints += 1
-                planned_velocity = float(getattr(sprint, "planned_velocity_hrs", 0.0) or 0.0)
-                total_planned_velocity += planned_velocity
+        Consumes from ProjectMetrics.resource_metrics instead of recalculating.
+        """
+        dev_metric = next(
+            (dm for dm in self.metrics.resource_metrics.developer_metrics 
+             if dm.resource_id == resource_id),
+            None
+        )
+        return dev_metric.remaining_effort_hours if dev_metric else 0.0
+
+    def _effective_remaining_capacity(self, resource: Any) -> float:
+        """
+        Calculate effective remaining capacity using forecast_input_metrics.
         
-        if remaining_sprints == 0:
-            # Fallback to at least 1 sprint of average planned velocity if no future sprints
-            remaining_sprints = 1
-            if self.project_state.sprints:
-                total_planned_velocity = float(sum(
-                    float(getattr(s, "planned_velocity_hrs", 0.0) or 0.0) 
-                    for s in self.project_state.sprints
-                ) / len(self.project_state.sprints))
-            else:
-                total_planned_velocity = 40.0  # Fallback default
+        Consumes from ProjectMetrics.forecast_input_metrics to avoid duplication
+        of capacity calculations already done by MetricsEngine.
+        """
+        remaining_sprints = float(
+            self.metrics.forecast_input_metrics.remaining_sprints or 1
+        )
+        capacity_per_sprint = float(
+            resource.daily_capacity_hrs or 0.0 
+        ) * (self.project_state.project_info.sprint_duration_days or 10)
         
-        # Apply availability and allocation to total capacity
-        capacity = total_planned_velocity * availability * allocation
-        return max(1.0, capacity)
+        # Apply resource availability and allocation
+        availability = float(getattr(resource, "availability_pct", 1.0) or 1.0)
+        allocation = float(getattr(resource, "allocation_pct", 1.0) or 1.0)
+        effective_capacity = capacity_per_sprint * remaining_sprints * availability * allocation
+        
+        return max(1.0, effective_capacity)
 
     def _blocked_cp_items(self) -> List[str]:
         active_blockers = [b for b in self.project_state.blockers if not getattr(b, "actual_resolution_date", None)]
@@ -277,94 +290,102 @@ class SprintDetector:
 
     def detect(self) -> List[OpportunitySignal]:
         signals: List[OpportunitySignal] = []
-        for sprint in self.project_state.sprints:
-            if getattr(sprint, "status", None) == SprintStatus.COMPLETED:
+        
+        # Consume sprint metrics from ProjectMetrics instead of recalculating
+        for sprint_metric in self.metrics.sprint_metrics:
+            sprint = next(
+                (s for s in self.project_state.sprints if s.sprint_id == sprint_metric.sprint_id),
+                None
+            )
+            
+            if sprint is None or getattr(sprint, "status", None) == SprintStatus.COMPLETED:
                 continue
             
-            # Calculate actual work items' effort assigned to this sprint
-            planned_hours = self._total_effort_in_sprint(sprint.sprint_id)
-            # Capacity is the planned velocity for this sprint
-            capacity_hours = float(getattr(sprint, "planned_velocity_hrs", 0.0) or 0.0)
-            utilization_ratio = planned_hours / max(capacity_hours, 1.0)
+            # Use utilization from metrics instead of recalculating
+            utilization_ratio = sprint_metric.completion_pct
+            planned_hours = sprint_metric.planned_effort_hours
+            capacity_hours = sprint_metric.planned_effort_hours
             
             # Detect under/overloaded sprints
             flag = None
-            if utilization_ratio < 0.5 and getattr(sprint, "sprint_number", 0) != self.metrics.current_sprint_number:
+            if utilization_ratio < 0.5 and sprint_metric.sprint_number != self.metrics.current_sprint_number:
                 flag = "UNDERLOADED"
             elif utilization_ratio > 1.1:
                 flag = "OVERLOADED"
             else:
                 continue
             
+            # Get blocked hours from blocker metrics if available
+            blocked_hours = 0.0
+            blocked_items = [
+                wi.item_id for wi in self.project_state.work_items
+                if getattr(wi, "assigned_sprint", None) == sprint_metric.sprint_id
+                and getattr(wi, "status", None) == WorkItemStatus.BLOCKED
+            ]
+            for item_id in blocked_items:
+                wi = next(
+                    (w for w in self.project_state.work_items if w.item_id == item_id),
+                    None
+                )
+                if wi:
+                    blocked_hours += float(getattr(wi, "remaining_effort_hrs", 0.0) or 0.0)
+            
+            # Get spillover probability from spillover analysis
+            spillover_prob = 0.0
+            if self.spillover:
+                spill_by_sprint = getattr(self.spillover, "predicted_spillover_by_sprint", {}) or {}
+                if isinstance(spill_by_sprint, dict):
+                    spillover_prob = float(spill_by_sprint.get(sprint_metric.sprint_number, 0.0))
+            
             context: Dict[str, Any] = {
-                "sprint_id": sprint.sprint_id,
-                "sprint_number": sprint.sprint_number,
+                "sprint_id": sprint_metric.sprint_id,
+                "sprint_number": sprint_metric.sprint_number,
                 "flag": flag,
                 "utilization_ratio": round(utilization_ratio, 4),
                 "planned_hours": round(planned_hours, 2),
                 "capacity_hours": round(capacity_hours, 2),
-                "blocked_hours": self._blocked_hours(sprint.sprint_id),
-                "blocked_pct": round(self._blocked_hours(sprint.sprint_id) / max(planned_hours, 1.0), 4),
-                "spillover_probability": self._spillover_probability(sprint.sprint_number),
-                "is_cp_sprint": self._is_cp_sprint(sprint.sprint_id),
+                "actual_effort_hours": round(sprint_metric.actual_effort_hours, 2),
+                "blocked_hours": round(blocked_hours, 2),
+                "blocked_pct": round(blocked_hours / max(planned_hours, 1.0), 4),
+                "spillover_probability": round(spillover_prob, 4),
+                "is_cp_sprint": self._is_cp_sprint(sprint_metric.sprint_id),
             }
+            
             evidence = [
                 SignalEvidence(
                     source_engine="spillover_engine",
-                    metric_name="sprint_spillover_probability",
-                    metric_value=float(context["spillover_probability"]),
+                    metric_name="predicted_spillover",
+                    metric_value=spillover_prob,
                     threshold=0.6,
                     explanation="Sprint spillover risk is elevated",
                 )
             ]
+            
             signals.append(
                 OpportunitySignal(
-                    signal_id=signal_id(SignalCategory.SPRINT, [sprint.sprint_id]),
+                    signal_id=signal_id(SignalCategory.SPRINT, [sprint_metric.sprint_id]),
                     category=SignalCategory.SPRINT,
                     severity=SignalSeverity.MEDIUM,
-                    affected_item_ids=self._items_in_sprint(sprint.sprint_id),
+                    affected_item_ids=self._items_in_sprint(sprint_metric.sprint_id),
                     affected_resource_ids=[],
-                    affected_sprint_ids=[sprint.sprint_id],
+                    affected_sprint_ids=[sprint_metric.sprint_id],
                     affected_blocker_ids=[],
                     evidence=evidence,
                     context=context,
                     detected_at=datetime.now(timezone.utc).isoformat(),
                 )
             )
+        
         return signals
-
-    def _blocked_hours(self, sprint_id: str) -> float:
-        blocked_hours = 0.0
-        for wi in self.project_state.work_items:
-            if getattr(wi, "assigned_sprint", None) == sprint_id:
-                if getattr(wi, "status", None) == getattr(wi.status, "BLOCKED", None):
-                    blocked_hours += float(getattr(wi, "remaining_effort_hrs", 0.0) or 0.0)
-        return round(blocked_hours, 2)
-
-    def _spillover_probability(self, sprint_number: int) -> float:
-        probs = getattr(self.spillover, "sprint_spillover_probability", None) or {}
-        if isinstance(probs, dict):
-            return float(probs.get(sprint_number, 0.0))
-        return 0.0
 
     def _items_in_sprint(self, sprint_id: str) -> List[str]:
         return [wi.item_id for wi in self.project_state.work_items if getattr(wi, "assigned_sprint", None) == sprint_id]
 
-    def _total_effort_in_sprint(self, sprint_id: str) -> float:
-        """Sum of estimated effort for all work items assigned to this sprint."""
-        total = 0.0
-        for wi in self.project_state.work_items:
-            if getattr(wi, "assigned_sprint", None) == sprint_id:
-                # Use current_estimate_hrs if available, otherwise use remaining_effort_hrs
-                estimate = float(getattr(wi, "current_estimate_hrs", None) or 0.0)
-                if estimate == 0.0:
-                    estimate = float(wi.remaining_effort_hrs or 0.0)
-                total += estimate
-        return total
-
     def _is_cp_sprint(self, sprint_id: str) -> bool:
+        """Check if any CP items are assigned to this sprint."""
         return any(
-            wi.item_id in self.forecast.cp_result.items_on_critical_path if hasattr(self.forecast, 'cp_result') else False
+            wi.item_id in self.forecast.items_on_critical_path 
+            if hasattr(self.forecast, 'items_on_critical_path') else False
             for wi in self.project_state.work_items
             if getattr(wi, "assigned_sprint", None) == sprint_id
         )
@@ -463,6 +484,14 @@ class CriticalPathDetector:
 
 
 class ScheduleDetector:
+    """
+    Detects schedule-related signals by consuming ForecastResult directly.
+    
+    This detector avoids recalculating schedule gaps, velocity trends, or other
+    forecast-related metrics. Instead, it consumes the output from ForecastEngine,
+    which is the single source of truth for schedule forecasts.
+    """
+    
     def __init__(
         self,
         project_state: ProjectState,
@@ -478,40 +507,34 @@ class ScheduleDetector:
         self.metrics = metrics
 
     def _schedule_gap_hours(self) -> float:
-        direct_value = getattr(self.forecast, "schedule_gap_hours", None)
-        if direct_value is not None:
-            return float(direct_value)
+        """
+        Extract schedule gap from ForecastResult breakdown.
+        
+        Consumes from ForecastResult.delay_breakdown instead of recalculating.
+        """
+        if hasattr(self.forecast, "delay_breakdown") and self.forecast.delay_breakdown:
+            return float(self.forecast.delay_breakdown.expected_delay_days * 8.0)
+        
+        # Fallback: use expected_delay_days directly
         expected_delay = float(getattr(self.forecast, "expected_delay_days", 0.0) or 0.0)
         return max(0.0, expected_delay * 8.0)
 
     def _velocity_trend(self) -> Optional[float]:
-        direct_value = getattr(self.metrics, "velocity_trend", None)
-        if direct_value is not None:
-            return float(direct_value)
-        actuals = [
-            float(getattr(actual, "actual_effort_hrs", 0.0) or 0.0)
-            for actual in getattr(self.project_state, "actuals", [])
-            if float(getattr(actual, "actual_effort_hrs", 0.0) or 0.0) > 0.0
-        ]
-        if len(actuals) >= 2:
-            start = actuals[0]
-            end = actuals[-1]
-            if start > 0:
-                return (end - start) / start
-        return None
+        """
+        Extract velocity trend from velocity_metrics in ProjectMetrics.
+        
+        Consumes from ProjectMetrics.velocity_metrics instead of recalculating.
+        """
+        return float(getattr(self.metrics.velocity_metrics, "velocity_trend_pct", None) or 0.0)
 
     def _highest_effort_not_started_items(self, limit: int = 3) -> List[str]:
-        """Find highest-effort not-started items to populate as affected items.
-        
-        This provides schedule signals with actionable work items.
-        """
-        from app.domain.models import WorkItemStatus
-        
+        """Find highest-effort not-started items to populate as affected items."""
         not_started_items = []
         for wi in self.project_state.work_items:
             status = getattr(wi, "status", None)
             # Skip if already started or completed
-            if status in (WorkItemStatus.IN_PROGRESS, WorkItemStatus.COMPLETED, WorkItemStatus.DONE, WorkItemStatus.BLOCKED, WorkItemStatus.SPILLOVER):
+            if status in (WorkItemStatus.IN_PROGRESS, WorkItemStatus.COMPLETED, 
+                         WorkItemStatus.DONE, WorkItemStatus.BLOCKED, WorkItemStatus.SPILLOVER):
                 continue
             effort = float(getattr(wi, "current_estimate_hrs", 0.0) or 0.0)
             if effort == 0.0:
@@ -524,13 +547,65 @@ class ScheduleDetector:
         return [item_id for item_id, _ in not_started_items[:limit]]
 
     def detect(self) -> List[OpportunitySignal]:
+        """
+        Detect schedule-related signals from ForecastResult.
+        
+        Key signals:
+        - SCHEDULE_GAP: when expected delay > 0
+        - VELOCITY_CONCERN: when velocity is degrading or uncertain
+        - SCOPE_CREEP: when scope inflation is detected
+        """
         signals: List[OpportunitySignal] = []
+        
+        # Extract schedule gap from forecast breakdown
         schedule_gap_hours = self._schedule_gap_hours()
         velocity_trend = self._velocity_trend()
-        # Get highest-effort not-started items to attach to schedule signals
+        scope_growth_hours = float(getattr(self.forecast, "scope_growth_hours", 0.0) or 0.0)
+        
+        # Get affected items
         affected_items = self._highest_effort_not_started_items(limit=3)
         
-        if schedule_gap_hours > 0:
+        # Signal 1: Schedule gap (primary signal)
+        if self.forecast.expected_delay_days > 0:
+            delay_breakdown = self.forecast.delay_breakdown if hasattr(self.forecast, "delay_breakdown") else None
+            remaining_days_base = float(delay_breakdown.remaining_days_base_work) if delay_breakdown else 0.0
+            remaining_days_blocker = float(delay_breakdown.remaining_days_blocker_loss) if delay_breakdown else 0.0
+            remaining_days_spillover = float(delay_breakdown.remaining_days_spillover) if delay_breakdown else 0.0
+            
+            context: Dict[str, Any] = {
+                "schedule_gap_hours": schedule_gap_hours,
+                "expected_delay_days": round(self.forecast.expected_delay_days, 2),
+                "on_track": self.forecast.on_track,
+                "flag": "SCHEDULE_AT_RISK",
+                "delay_breakdown": {
+                    "base_work_days": round(remaining_days_base, 2),
+                    "blocker_loss_days": round(remaining_days_blocker, 2),
+                    "spillover_days": round(remaining_days_spillover, 2),
+                },
+                "scope_growth_hours": round(scope_growth_hours, 2),
+                "velocity_trend_pct": round(velocity_trend, 2) if velocity_trend else 0.0,
+            }
+            
+            evidence = [
+                SignalEvidence(
+                    source_engine="forecast_engine",
+                    metric_name="expected_delay_days",
+                    metric_value=self.forecast.expected_delay_days,
+                    threshold=0.0,
+                    explanation="Forecast indicates schedule delay",
+                )
+            ]
+            
+            if velocity_trend and velocity_trend < 0:
+                evidence.append(SignalEvidence(
+                    source_engine="metrics_engine",
+                    metric_name="velocity_trend_pct",
+                    metric_value=velocity_trend,
+                    threshold=0.0,
+                    explanation="Velocity is degrading over time",
+                ))
+                context["velocity_degrading"] = True
+            
             signals.append(
                 OpportunitySignal(
                     signal_id=signal_id(SignalCategory.SCHEDULE, ["schedule_gap"]),
@@ -540,87 +615,43 @@ class ScheduleDetector:
                     affected_resource_ids=[],
                     affected_sprint_ids=[],
                     affected_blocker_ids=[],
-                    evidence=[
-                        SignalEvidence(
-                            source_engine="forecast_engine",
-                            metric_name="schedule_gap_hours",
-                            metric_value=schedule_gap_hours,
-                            threshold=0.0,
-                            explanation="Forecast indicates a schedule gap",
-                        )
-                    ],
-                    context={
-                        "schedule_gap_hours": round(schedule_gap_hours, 2),
-                        "on_time_probability": round(self.monte_carlo.on_time_probability, 4),
-                        "expected_delay_days": round(self.forecast.expected_delay_days, 2),
-                        "velocity_trend": velocity_trend,
-                        "velocity_degrading": bool(velocity_trend is not None and velocity_trend < -0.1),
-                        "scope_inflation_pct": 0.0,
-                        "flag": "SCHEDULE_GAP",
-                    },
+                    evidence=evidence,
+                    context=context,
                     detected_at=datetime.now(timezone.utc).isoformat(),
                 )
             )
-        if self.monte_carlo.on_time_probability < 0.5:
+        
+        # Signal 2: Scope creep (secondary signal if scope is growing)
+        if scope_growth_hours > 0:
+            context: Dict[str, Any] = {
+                "scope_inflation_hours": round(scope_growth_hours, 2),
+                "scope_inflation_pct": round(
+                    (scope_growth_hours / self.forecast.raw_remaining_effort_hours * 100.0)
+                    if self.forecast.raw_remaining_effort_hours > 0 else 0.0,
+                    2
+                ),
+                "flag": "SCOPE_CREEP",
+            }
+            
             signals.append(
                 OpportunitySignal(
-                    signal_id=signal_id(SignalCategory.SCHEDULE, ["probability_concern"]),
+                    signal_id=signal_id(SignalCategory.SCHEDULE, ["scope_creep"]),
                     category=SignalCategory.SCHEDULE,
                     severity=SignalSeverity.MEDIUM,
-                    affected_item_ids=affected_items,
+                    affected_item_ids=affected_items[:1],  # Top affected item
                     affected_resource_ids=[],
                     affected_sprint_ids=[],
                     affected_blocker_ids=[],
-                    evidence=[
-                        SignalEvidence(
-                            source_engine="monte_carlo_engine",
-                            metric_name="on_time_probability",
-                            metric_value=self.monte_carlo.on_time_probability,
-                            threshold=0.5,
-                            explanation="Monte Carlo probability of on-time delivery is below the threshold",
-                        )
-                    ],
-                    context={
-                        "schedule_gap_hours": round(schedule_gap_hours, 2),
-                        "on_time_probability": round(self.monte_carlo.on_time_probability, 4),
-                        "expected_delay_days": round(self.forecast.expected_delay_days, 2),
-                        "velocity_trend": velocity_trend,
-                        "velocity_degrading": bool(velocity_trend is not None and velocity_trend < -0.1),
-                        "scope_inflation_pct": 0.0,
-                        "flag": "PROBABILITY_CONCERN",
-                    },
+                    evidence=[SignalEvidence(
+                        source_engine="forecast_engine",
+                        metric_name="scope_growth_hours",
+                        metric_value=scope_growth_hours,
+                        threshold=0.0,
+                        explanation="Scope growth is impacting the schedule",
+                    )],
+                    context=context,
                     detected_at=datetime.now(timezone.utc).isoformat(),
                 )
             )
-        if velocity_trend is not None and velocity_trend < -0.1:
-            signals.append(
-                OpportunitySignal(
-                    signal_id=signal_id(SignalCategory.SCHEDULE, ["velocity_concern"]),
-                    category=SignalCategory.SCHEDULE,
-                    severity=SignalSeverity.LOW,
-                    affected_item_ids=affected_items,
-                    affected_resource_ids=[],
-                    affected_sprint_ids=[],
-                    affected_blocker_ids=[],
-                    evidence=[
-                        SignalEvidence(
-                            source_engine="metrics_engine",
-                            metric_name="velocity_trend",
-                            metric_value=velocity_trend,
-                            threshold=-0.1,
-                            explanation="Velocity trend is degrading",
-                        )
-                    ],
-                    context={
-                        "schedule_gap_hours": round(schedule_gap_hours, 2),
-                        "on_time_probability": round(self.monte_carlo.on_time_probability, 4),
-                        "expected_delay_days": round(self.forecast.expected_delay_days, 2),
-                        "velocity_trend": velocity_trend,
-                        "velocity_degrading": True,
-                        "scope_inflation_pct": 0.0,
-                        "flag": "VELOCITY_CONCERN",
-                    },
-                    detected_at=datetime.now(timezone.utc).isoformat(),
-                )
-            )
+        
         return signals

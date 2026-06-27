@@ -6,7 +6,7 @@ critical-path sequencing, spillover, and blocker impacts. No Monte Carlo,
 no probabilities.
 """
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from app.domain.models import ProjectState, SprintStatus
 from app.engines.metrics_engine import ProjectMetrics
@@ -17,6 +17,11 @@ from app.api.models_phase3 import (
     ForecastDelayBreakdown,
     ForecastScheduleDiagnostics,
     ForecastEffortBreakdown,
+    ForecastConfidence,
+    ForecastDriver,
+    ForecastEvidence,
+    ForecastAssumptions,
+    ForecastExplanation,
 )
 
 
@@ -50,15 +55,10 @@ class ForecastEngine:
     def calculate(self) -> ForecastResult:
         """Calculate deterministic forecast and return ForecastResult."""
 
-        # 1) Remaining effort (use metrics which sum remaining_effort_hrs)
         remaining_effort = float(self.metrics.remaining_effort_hours)
-
-        # 2) R2: Account for dependency sequencing using REMAINING critical path effort
-        # Use critical_path_remaining_hours (effort still to do on critical path), not full duration
         cp_remaining_hours = float(getattr(self.cp_result, "critical_path_remaining_hours", 0.0) or 0.0)
         adjusted_remaining = max(remaining_effort, cp_remaining_hours)
 
-        # 3) Calculate spillover schedule impact without inflating remaining work.
         avg_item_effort = float(getattr(self.metrics, "average_item_effort", 20.0) or 20.0)
         spillover_hours = 0.0
         predicted_spillover_items = 0.0
@@ -71,182 +71,116 @@ class ForecastEngine:
                 predicted_spillover_items = 0.0
                 spillover_hours = 0.0
 
-        # 4) Projected velocity (hours per sprint), adjust for blocker impact AND
-        # spillover-driven throughput erosion.
-        #
-        # MODELING NOTE (replaces additive spillover-days term):
-        # Spillover does not create a second, parallel block of work that gets
-        # added on top of the remaining-effort schedule. It represents capacity
-        # mismatch — work re-entering the backlog instead of completing — which
-        # reduces how much real progress the team makes per sprint. We therefore
-        # fold spillover into projected_velocity as a throughput penalty, the
-        # same way blocker_impact already is, rather than as a separate additive
-        # days term. This avoids double-counting the same underlying effort against
-        # two independently-scaled schedule terms that happen to converge on the
-        # same units (hours -> days via the same velocity and sprint length).
         base_velocity = float(self.metrics.actual_avg_velocity or self.metrics.planned_total_velocity or 1.0)
         blocker_impact = float(getattr(self.metrics, "estimated_blocker_velocity_impact", 0.0) or 0.0)
-
-        # spillover_fraction: what share of remaining effort is predicted to be
-        # spillover-driven churn, capped at 0.5 so the model never claims the
-        # team's effective output collapses to near-zero from spillover alone.
-        spillover_fraction = (
-            min(0.5, spillover_hours / remaining_effort) if remaining_effort > 0 else 0.0
-        )
-        # SPILLOVER_VELOCITY_DAMPING: spillover erodes throughput at half the
-        # rate implied by its raw fraction — i.e. fully spillover-saturated
-        # remaining work (fraction capped at 0.5) costs at most a 25% velocity
-        # hit. This is a stated modeling assumption, not a derived constant;
-        # recalibrate once delivered-vs-forecast outcome data exists (see
-        # RiskEngine weight calibration roadmap item).
-        SPILLOVER_VELOCITY_DAMPING = 0.5
-
+        spillover_fraction = min(0.5, spillover_hours / remaining_effort) if remaining_effort > 0 else 0.0
         projected_velocity = max(
-            base_velocity
-            * (1.0 - blocker_impact)
-            * (1.0 - spillover_fraction * SPILLOVER_VELOCITY_DAMPING),
+            base_velocity * (1.0 - blocker_impact) * (1.0 - spillover_fraction * 0.5),
             base_velocity * 0.25,
         )
 
-        # 5) Remaining sprints and days.
-        # Spillover is now expressed entirely through the eroded projected_velocity
-        # above — there is no separate additive spillover-days term. spillover_hours
-        # and predicted_spillover_items are retained as diagnostics only (see
-        # effort_breakdown / spillover_penalty_hours) and must not be summed into
-        # remaining_days_total.
         sprint_days = float(self.project_state.project_info.sprint_duration_days or 14)
-        remaining_sprints = adjusted_remaining / projected_velocity if projected_velocity > 0 else float('inf')
-        raw_work_days = remaining_sprints * sprint_days
-        # spillover_delay_days is kept as a diagnostic estimate of how many of the
-        # raw_work_days are attributable to spillover-driven velocity erosion,
-        # computed as the difference between the eroded-velocity schedule and what
-        # the schedule would have been at blocker-only-adjusted velocity. This is
-        # informational and is NOT added into remaining_days_total.
-        velocity_without_spillover = max(
-            base_velocity * (1.0 - blocker_impact),
-            base_velocity * 0.25,
-        )
+        velocity_without_spillover = max(base_velocity * (1.0 - blocker_impact), base_velocity * 0.25)
+        base_schedule_days = (adjusted_remaining / base_velocity) * sprint_days if base_velocity > 0 else 0.0
         days_without_spillover = (
             (adjusted_remaining / velocity_without_spillover) * sprint_days
-            if velocity_without_spillover > 0
-            else 0.0
+            if velocity_without_spillover > 0 else 0.0
         )
-        spillover_delay_days = max(0.0, raw_work_days - days_without_spillover)
-        remaining_days_base_work = raw_work_days
-        remaining_days_blocker_loss = max(
-            0.0,
-            days_without_spillover - (adjusted_remaining / base_velocity * sprint_days if base_velocity > 0 else 0.0),
-        )
-        remaining_days_total = raw_work_days
-
-        # DIAGNOSTIC: spillover_delay_days can legitimately be 0.0 even when
-        # spillover_penalty_hours (and predicted_spillover_items) are large and
-        # nonzero. This happens when blocker_impact alone is already severe
-        # enough to push velocity_without_spillover down to the same 25% floor
-        # that projected_velocity is also clamped to — at that point spillover
-        # has no further room to erode velocity, because both terms hit the
-        # identical floor. Without this flag, a large spillover_penalty_hours
-        # sitting next to a 0.0 spillover_delay_days looks like a bug (two
-        # numbers disagreeing) when it is actually blockers fully saturating
-        # the velocity floor before spillover is even applied. Surface this
-        # explicitly rather than leaving the zero unexplained.
+        remaining_days_blocker_loss = max(0.0, days_without_spillover - base_schedule_days)
+        raw_remaining_days = (adjusted_remaining / projected_velocity) * sprint_days if projected_velocity > 0 else 0.0
+        spillover_delay_days = max(0.0, raw_remaining_days - days_without_spillover)
+        remaining_days_base_work = base_schedule_days
+        remaining_days_total = base_schedule_days + remaining_days_blocker_loss + spillover_delay_days
         velocity_floor = base_velocity * 0.25
-        velocity_floor_saturated_by_blockers = bool(
-            velocity_without_spillover <= velocity_floor + 1e-6 and spillover_hours > 0.0
-        )
+        velocity_floor_saturated_by_blockers = bool(velocity_without_spillover <= velocity_floor + 1e-6 and spillover_hours > 0.0)
 
-        # Diagnostic breakdown (keeps original base_velocity-based values for
-        # explanation). Updated to match the velocity-erosion spillover model:
-        # spillover_days_diag now reports the same diagnostic quantity computed
-        # above (days attributable to spillover-driven velocity erosion), rather
-        # than an independently-scaled additive term, so this breakdown can no
-        # longer silently diverge from remaining_days_total's methodology.
-        base_schedule_days = (remaining_effort / base_velocity) * sprint_days if base_velocity > 0 else 0.0
-        critical_path_days = 0.0
+        cp_remaining_days = 0.0
         if cp_remaining_hours > remaining_effort and base_velocity > 0:
-            critical_path_days = ((cp_remaining_hours - remaining_effort) / base_velocity) * sprint_days
+            cp_remaining_days = ((cp_remaining_hours - remaining_effort) / base_velocity) * sprint_days
         spillover_days_diag = spillover_delay_days
         blocker_days_diag = remaining_days_blocker_loss
-        diagnostic_total = base_schedule_days + critical_path_days + spillover_days_diag + blocker_days_diag
+        diagnostic_total = base_schedule_days + cp_remaining_days + spillover_days_diag + blocker_days_diag
 
-        # R1: Timeline Anchoring - calculate progress using workbook schedule dates,
-        # not the current wall clock. This keeps forecasts deterministic and tied to
-        # the planned project timeline.
         project_start = self.project_state.project_info.forecast_anchor_date()
         days_elapsed = self._calculate_schedule_elapsed_days(sprint_days)
-        
-        # Expected finish = project_start + elapsed + remaining
         expected_finish = project_start + timedelta(days=days_elapsed + remaining_days_total)
 
-        # R5: Target Date Comparison
         target_end_date = self.project_state.project_info.target_end_date
-        # planned window in days between anchor and target
         planned_window_days = float((target_end_date - project_start).days)
-
-        # Use the additive decomposition for expected_delay_days so top-level
-        # value matches the delay_breakdown exactly (preserve decimals).
         expected_delay_raw = days_elapsed + remaining_days_total - planned_window_days
         expected_delay_days = float(round(expected_delay_raw, 2))
         on_track = expected_delay_days <= 0
 
-        # 7) Completion percentage (based on total effort and remaining effort)
         total_effort = float(getattr(self.metrics, "total_effort_hours", 0.0) or 0.0)
-        if total_effort > 0:
-            completion_pct = max(0.0, min(1.0, (total_effort - remaining_effort) / total_effort))
-        else:
-            completion_pct = 0.0
+        completion_pct = (
+            max(0.0, min(1.0, (total_effort - remaining_effort) / total_effort))
+            if total_effort > 0 else 0.0
+        )
 
-        # Scope growth explainability
         scope_growth_hours = float(
-            sum(
-                max(0.0, wi.current_estimate_hrs - wi.estimated_effort_hrs)
-                for wi in self.project_state.work_items
-            )
+            sum(max(0.0, wi.current_estimate_hrs - wi.estimated_effort_hrs) for wi in self.project_state.work_items)
         )
         scope_growth_percent = float(round((scope_growth_hours / total_effort * 100.0) if total_effort > 0 else 0.0, 2))
         projected_velocity_per_day = float(projected_velocity / sprint_days if sprint_days > 0 else 0.0)
         scope_impact_days = float(round(scope_growth_hours / projected_velocity_per_day, 2)) if projected_velocity_per_day > 0 else 0.0
 
-        if scope_growth_hours > 0:
-            scope_growth_message = (
-                f"Project scope has increased by {scope_growth_hours:.1f} hours since baseline, "
-                f"contributing approximately {scope_impact_days:.1f} days to the forecast delay."
-            )
-        else:
-            scope_growth_message = "Project scope has not increased since baseline."
+        blocker_penalty_hours_calc = (
+            remaining_days_blocker_loss * (velocity_without_spillover / sprint_days)
+            if sprint_days > 0 else 0.0
+        )
+        blocker_penalty_hours_final = min(float(adjusted_remaining), max(0.0, blocker_penalty_hours_calc))
 
-        # Explain a zero spillover_delay_days alongside a nonzero
-        # spillover_penalty_hours so the two numbers don't look contradictory.
+        scope_growth_message = (
+            f"Scope growth contributes {scope_impact_days:.1f} days to the forecast."
+            if scope_growth_hours > 0 else "Scope growth is not material to the forecast."
+        )
         if velocity_floor_saturated_by_blockers:
             spillover_message = (
-                f"Predicted spillover represents {spillover_hours:.1f} hours of "
-                f"capacity-mismatch risk, but blocker impact alone has already "
-                f"reduced projected velocity to its floor ({velocity_floor:.1f} "
-                f"hrs/sprint), leaving no further room for spillover to erode "
-                f"velocity. Spillover's contribution to schedule delay is 0.0 days "
-                f"in this scenario because blockers are the dominant constraint — "
-                f"resolving blockers would re-expose spillover's schedule impact."
+                f"Spillover is present, but blockers already reduce velocity to the floor level."
             )
         elif spillover_delay_days > 0:
-            spillover_message = (
-                f"Predicted spillover is reducing effective velocity, contributing "
-                f"approximately {spillover_delay_days:.1f} days to the forecast delay."
-            )
+            spillover_message = f"Spillover adds approximately {spillover_delay_days:.1f} days to the forecast."
         else:
-            spillover_message = "No material spillover-driven schedule impact predicted."
+            spillover_message = "No material spillover delay is projected."
 
-        # Derive blocker penalty hours from remaining_days_blocker_loss (days)
-        # Convert days -> hours using the blocker-only velocity (velocity_without_spillover / sprint_days)
-        try:
-            blocker_penalty_hours_calc = (
-                remaining_days_blocker_loss * (velocity_without_spillover / sprint_days)
-                if sprint_days > 0
-                else 0.0
-            )
-        except Exception:
-            blocker_penalty_hours_calc = 0.0
+        delay_breakdown = ForecastDelayBreakdown(
+            planned_window_days=float(round(planned_window_days, 2)),
+            days_elapsed=float(round(days_elapsed, 2)),
+            remaining_days_total=float(round(remaining_days_total, 2)),
+            remaining_days_base_work=float(round(remaining_days_base_work, 2)),
+            remaining_days_spillover=float(round(spillover_delay_days, 2)),
+            remaining_days_blocker_loss=float(round(remaining_days_blocker_loss, 2)),
+            expected_delay_days=float(round(days_elapsed + remaining_days_total - planned_window_days, 2)),
+        )
+        schedule_diagnostics = ForecastScheduleDiagnostics(
+            is_additive=False,
+            base_schedule_days=float(round(base_schedule_days, 2)),
+            spillover_days=float(round(spillover_days_diag, 2)),
+            blocker_days=float(round(blocker_days_diag, 2)),
+            critical_path_days=float(round(cp_remaining_days, 2)),
+            diagnostic_total_days=float(round(diagnostic_total, 2)),
+            velocity_floor_saturated_by_blockers=velocity_floor_saturated_by_blockers,
+            spillover_message=spillover_message,
+        )
+        effort_breakdown = ForecastEffortBreakdown(
+            raw_remaining_effort_hours=float(round(remaining_effort, 2)),
+            critical_path_remaining_hours=float(round(cp_remaining_hours, 2)),
+            spillover_penalty_hours=float(round(spillover_hours, 2)),
+            blocker_penalty_hours=float(round(blocker_penalty_hours_final, 2)),
+            forecast_adjusted_effort_hours=float(round(adjusted_remaining, 2)),
+        )
 
-        blocker_penalty_hours_final = min(float(adjusted_remaining), max(0.0, blocker_penalty_hours_calc))
+        confidence = self._build_confidence()
+        forecast_drivers = self._build_forecast_drivers(
+            scope_impact_days=scope_impact_days,
+            remaining_days_blocker_loss=remaining_days_blocker_loss,
+            cp_remaining_days=cp_remaining_days,
+            spillover_delay_days=spillover_delay_days,
+            remaining_days_base_work=remaining_days_base_work,
+        )
+        forecast_evidence = self._build_forecast_evidence()
+        assumptions = self._build_assumptions()
+        explanation = self._build_explanation(expected_delay_days, confidence, forecast_drivers)
 
         return ForecastResult(
             target_end_date=target_end_date,
@@ -267,32 +201,14 @@ class ForecastEngine:
             scope_growth_percent=scope_growth_percent,
             scope_impact_days=scope_impact_days,
             scope_growth_message=scope_growth_message,
-            delay_breakdown={
-                "planned_window_days": float(round(planned_window_days, 2)),
-                "days_elapsed": float(round(days_elapsed, 2)),
-                "remaining_days_total": float(round(remaining_days_total, 2)),
-                "remaining_days_base_work": float(round(remaining_days_base_work, 2)),
-                "remaining_days_spillover": float(round(spillover_delay_days, 2)),
-                "remaining_days_blocker_loss": float(round(remaining_days_blocker_loss, 2)),
-                "expected_delay_days": float(round(days_elapsed + remaining_days_total - planned_window_days, 2)),
-            },
-            schedule_diagnostics={
-                "is_additive": False,
-                "base_schedule_days": float(round(base_schedule_days, 2)),
-                "spillover_days": float(round(spillover_days_diag, 2)),
-                "blocker_days": float(round(blocker_days_diag, 2)),
-                "critical_path_days": float(round(critical_path_days, 2)),
-                "diagnostic_total_days": float(round(diagnostic_total, 2)),
-                "velocity_floor_saturated_by_blockers": velocity_floor_saturated_by_blockers,
-                "spillover_message": spillover_message,
-            },
-            effort_breakdown={
-                "raw_remaining_effort_hours": float(round(remaining_effort, 2)),
-                "critical_path_remaining_hours": float(round(cp_remaining_hours, 2)),
-                "spillover_penalty_hours": float(round(spillover_hours, 2)),
-                "blocker_penalty_hours": float(round(blocker_penalty_hours_final, 2)),
-                "forecast_adjusted_effort_hours": float(round(adjusted_remaining, 2)),
-            },
+            delay_breakdown=delay_breakdown,
+            schedule_diagnostics=schedule_diagnostics,
+            effort_breakdown=effort_breakdown,
+            confidence=confidence,
+            forecast_drivers=forecast_drivers,
+            forecast_evidence=forecast_evidence,
+            forecast_assumptions=assumptions,
+            forecast_explanation=explanation,
             forecast_vs_montecarlo_note=(
                 "The deterministic forecast applies worst-credible-case assumptions: "
                 "full blocker velocity reduction and a capped velocity penalty from "
@@ -306,6 +222,154 @@ class ForecastEngine:
                 "Both are correct — they answer different questions."
             ),
         )
+
+    def _build_confidence(self) -> ForecastConfidence:
+        """Derive a deterministic forecast confidence score from measurable indicators."""
+        velocity_stability = max(0.0, min(1.0, float(self.metrics.velocity_metrics.velocity_stability_score or 0.0)))
+        planning_accuracy = max(0.0, min(1.0, float(self.metrics.planning_metrics.planning_accuracy_score or 0.0)))
+        estimation_variance = max(0.0, min(1.0, 1.0 - min(1.0, abs(self.metrics.velocity_variance) / max(self.metrics.actual_avg_velocity, 1.0))))
+        carryover_consistency = max(0.0, min(1.0, 1.0 - min(1.0, self.metrics.historical_carryover_rate)))
+        blocker_volatility = max(0.0, min(1.0, 1.0 - min(1.0, self.metrics.active_blocker_count / max(self.metrics.total_items, 1))))
+        dependency_density = max(0.0, min(1.0, 1.0 - min(1.0, self.metrics.dependency_count / max(self.metrics.total_items, 1))))
+        historical_stability = max(0.0, min(1.0, float(self.metrics.velocity_metrics.velocity_stability_score or 0.0)))
+
+        confidence_score = (
+            0.25 * velocity_stability
+            + 0.2 * planning_accuracy
+            + 0.15 * estimation_variance
+            + 0.15 * carryover_consistency
+            + 0.1 * blocker_volatility
+            + 0.1 * dependency_density
+            + 0.05 * historical_stability
+        )
+        confidence_score = max(0.0, min(1.0, confidence_score))
+        if confidence_score >= 0.75:
+            confidence_level = "HIGH"
+            reason = "Historical delivery signals are stable and planning accuracy is strong."
+        elif confidence_score >= 0.45:
+            confidence_level = "MEDIUM"
+            reason = "Forecast confidence is moderate because some planning and execution signals are mixed."
+        else:
+            confidence_level = "LOW"
+            reason = "The forecast is highly sensitive to blockers, carryover, and unstable velocity."
+
+        return ForecastConfidence(
+            confidence_score=float(round(confidence_score, 4)),
+            confidence_level=confidence_level,
+            confidence_reason=reason,
+            confidence_inputs={
+                "velocity_stability": round(velocity_stability, 4),
+                "planning_accuracy": round(planning_accuracy, 4),
+                "estimation_variance": round(estimation_variance, 4),
+                "carryover_consistency": round(carryover_consistency, 4),
+                "blocker_volatility": round(blocker_volatility, 4),
+                "dependency_density": round(dependency_density, 4),
+                "historical_stability": round(historical_stability, 4),
+            },
+        )
+
+    def _build_forecast_drivers(
+        self,
+        scope_impact_days: float,
+        remaining_days_blocker_loss: float,
+        cp_remaining_days: float,
+        spillover_delay_days: float,
+        remaining_days_base_work: float,
+    ) -> List[ForecastDriver]:
+        """Build ranked drivers from deterministic forecast components."""
+        drivers: List[ForecastDriver] = []
+        if scope_impact_days > 0:
+            drivers.append(ForecastDriver(
+                name="Scope Growth",
+                impact=float(round(scope_impact_days, 2)),
+                reason="Current estimates exceed the baseline estimate for one or more work items.",
+                supporting_metrics={"scope_growth_hours": float(round(self._scope_growth_hours(), 2))},
+            ))
+        if remaining_days_blocker_loss > 0:
+            drivers.append(ForecastDriver(
+                name="Blockers",
+                impact=float(round(remaining_days_blocker_loss, 2)),
+                reason="Blockers reduce effective throughput relative to the base scheduled velocity.",
+                supporting_metrics={"estimated_blocker_velocity_impact": float(round(self.metrics.estimated_blocker_velocity_impact, 4))},
+            ))
+        if cp_remaining_days > 0:
+            drivers.append(ForecastDriver(
+                name="Critical Path",
+                impact=float(round(cp_remaining_days, 2)),
+                reason="Dependency sequencing requires serial work that extends the schedule beyond raw remaining effort.",
+                supporting_metrics={"critical_path_remaining_hours": float(round(self.cp_result.critical_path_remaining_hours, 2))},
+            ))
+        if spillover_delay_days > 0:
+            drivers.append(ForecastDriver(
+                name="Carryover",
+                impact=float(round(spillover_delay_days, 2)),
+                reason="Predicted spillover erodes effective velocity and adds schedule delay.",
+                supporting_metrics={"predicted_spillover_items": float(round(self._predicted_spillover_items(), 2))},
+            ))
+        if remaining_days_base_work > 0:
+            drivers.append(ForecastDriver(
+                name="Base Workload",
+                impact=float(round(remaining_days_base_work, 2)),
+                reason="Remaining effort still requires schedule time even before secondary effects are applied.",
+                supporting_metrics={"remaining_effort_hours": float(round(self.metrics.remaining_effort_hours, 2))},
+            ))
+        return sorted(drivers, key=lambda d: d.impact, reverse=True)
+
+    def _build_forecast_evidence(self) -> List[ForecastEvidence]:
+        """Expose structured evidence values already available through ProjectMetrics."""
+        return [
+            ForecastEvidence(name="Historical velocity", value=self.metrics.actual_avg_velocity, unit="hours/sprint", source="MetricsEngine"),
+            ForecastEvidence(name="Remaining effort", value=self.metrics.remaining_effort_hours, unit="hours", source="MetricsEngine"),
+            ForecastEvidence(name="Critical path remaining effort", value=self.cp_result.critical_path_remaining_hours, unit="hours", source="CriticalPathEngine"),
+            ForecastEvidence(name="Carryover history", value=self.metrics.historical_total_carryover_items, unit="items", source="MetricsEngine"),
+            ForecastEvidence(name="Planning accuracy", value=self.metrics.planning_metrics.planning_accuracy_score, unit="score", source="MetricsEngine"),
+            ForecastEvidence(name="Dependency density", value=self.metrics.dependency_metrics.critical_dependency_density, unit="ratio", source="MetricsEngine"),
+            ForecastEvidence(name="Blocker counts", value=self.metrics.active_blocker_count, unit="count", source="MetricsEngine"),
+            ForecastEvidence(name="Resource utilization", value=self.metrics.avg_allocation_pct, unit="ratio", source="MetricsEngine"),
+        ]
+
+    def _build_assumptions(self) -> ForecastAssumptions:
+        """Document forecast assumptions in machine-readable form."""
+        return ForecastAssumptions(
+            velocity_calculation_method="projected_velocity = base_velocity * (1 - blocker_impact) * (1 - spillover_fraction * 0.5), floored at 25% of base velocity",
+            blocker_adjustment_method="blocker_impact is applied as a multiplicative velocity reduction factor from ProjectMetrics",
+            spillover_adjustment_method="predicted spillover is converted to equivalent hours and reduces effective throughput rather than adding a separate additive delay bucket",
+            critical_path_handling="critical_path_remaining_hours is used as a lower bound for remaining work so serial dependency effort cannot be under-counted",
+            timeline_anchoring="forecast uses sprint-based elapsed days and project start anchor date rather than current wall-clock time",
+            capacity_assumptions={"velocity_floor_ratio": 0.25, "spillover_damping_ratio": 0.5},
+        )
+
+    def _build_explanation(self, expected_delay_days: float, confidence: ForecastConfidence, forecast_drivers: List[ForecastDriver]) -> ForecastExplanation:
+        """Create structured explanation payload for downstream consumers."""
+        if expected_delay_days <= 0:
+            delay_signal = "on track"
+            summary = "The deterministic schedule remains within the planned window."
+        elif expected_delay_days <= 7:
+            delay_signal = "slightly late"
+            summary = "The deterministic schedule is projected to slip slightly beyond the target window."
+        else:
+            delay_signal = "late"
+            summary = "The deterministic schedule is projected to miss the target window materially."
+
+        primary_driver = forecast_drivers[0].name if forecast_drivers else "Base Workload"
+        return ForecastExplanation(
+            summary=summary,
+            primary_driver=primary_driver,
+            driver_names=[driver.name for driver in forecast_drivers],
+            confidence_note=confidence.confidence_reason,
+            delay_signal=delay_signal,
+        )
+
+    def _scope_growth_hours(self) -> float:
+        return float(sum(max(0.0, wi.current_estimate_hrs - wi.estimated_effort_hrs) for wi in self.project_state.work_items))
+
+    def _predicted_spillover_items(self) -> float:
+        if self.spillover is None:
+            return 0.0
+        try:
+            return float(sum(self.spillover.predicted_spillover_by_sprint.values()))
+        except Exception:
+            return 0.0
 
     def _calculate_schedule_elapsed_days(self, sprint_days: float) -> float:
         """Estimate elapsed project time using sprint schedule dates only."""
